@@ -215,6 +215,24 @@ def _compute_hmac(key: bytes, prev_hmac: str, entry: dict[str, Any]) -> str:
     Compute a tamper-evident HMAC-SHA256 for audit log chaining.
 
     This computes the HMAC-SHA256 digest over the concatenation of the previous event's HMAC
+    (`prev_hmac`) and the canonical (deterministically serialized) JSON payload for the current
+    audit event (`entry`). This scheme forms a cryptographic chain, where each event is linked
+    to its predecessor and any tampering with past log entries disrupts the chain, making changes
+tamper-evident. This is the core mechanism powering Bernstein's immutable audit log, ensuring all
+modifications can be detected during verification.
+
+    Args:
+        key: The secret HMAC key as bytes.
+        prev_hmac: Hex digest of the prior event's HMAC in the chain.
+        entry: Dictionary payload for the current event (serialized with sorted keys for determinism).
+
+    Returns:
+        Hex-encoded HMAC-SHA256 digest chaining prior HMAC and canonicalized current payload.
+    """
+    """
+    Compute a tamper-evident HMAC-SHA256 for audit log chaining.
+
+    This computes the HMAC-SHA256 digest over the concatenation of the previous event's HMAC
     and the canonical (deterministically serialized) JSON payload for the current audit event.
     This forms a cryptographic chain linking each event to its predecessor, so that any
     tampering anywhere in the log breaks the chain and can be detected. Use as the core
