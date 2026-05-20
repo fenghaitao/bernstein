@@ -211,7 +211,22 @@ class AuditEvent:
 
 
 def _compute_hmac(key: bytes, prev_hmac: str, entry: dict[str, Any]) -> str:
-    """Compute HMAC-SHA256 over the previous HMAC concatenated with the canonical JSON payload."""
+    """
+    Compute a tamper-evident HMAC-SHA256 for audit log chaining.
+
+    This computes the HMAC-SHA256 digest over the concatenation of the previous event's HMAC
+    and the canonical (deterministically serialized) JSON payload for the current audit event.
+    This forms a cryptographic chain linking each event to its predecessor, so that any
+    tampering anywhere in the log breaks the chain and can be detected. Use as the core
+    mechanism for Bernstein's immutable audit log.
+
+    Args:
+        key: Secret HMAC key.
+        prev_hmac: Hex digest of the prior event's HMAC in the audit chain.
+        entry: Dictionary payload for the current event (will be canonicalized).
+    Returns:
+        Hex-encoded HMAC-SHA256 digest chaining prior HMAC and current payload.
+    """
     payload = prev_hmac + json.dumps(entry, sort_keys=True)
     return _hmac.new(key, payload.encode(), hashlib.sha256).hexdigest()
 
