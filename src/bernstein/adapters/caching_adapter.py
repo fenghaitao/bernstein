@@ -106,6 +106,7 @@ class CachingAdapter(CLIAdapter):
         task_scope: str = "medium",
         budget_multiplier: float = 1.0,
         system_addendum: str = "",
+        multimodal_context: Any | None = None,
     ) -> SpawnResult:
         """Spawn agent with caching: process prompt, check response cache, then delegate.
 
@@ -120,7 +121,7 @@ class CachingAdapter(CLIAdapter):
         Returns:
             SpawnResult (pid=0 if cache hit, otherwise from the inner adapter).
         """
-        # 1. Prompt prefix caching (Anthropic-style) — pass session_id for per-agent tracking
+        # 1. Prompt prefix caching (Anthropic-style) - pass session_id for per-agent tracking
         cache_res = self._caching_mgr.process_prompt(prompt, session_id=session_id)
 
         # 2. Emit cache break event when prefix is new
@@ -128,7 +129,7 @@ class CachingAdapter(CLIAdapter):
             import hashlib as _hashlib
 
             # The component fingerprint is a short hash of the reason class and
-            # new cache key — agents that receive the same upstream change (e.g.
+            # new cache key - agents that receive the same upstream change (e.g.
             # same template update) will produce identical fingerprints, enabling
             # cross-agent systemic-break correlation.
             _reason = CacheBreakReason.SYSTEM
@@ -165,7 +166,7 @@ class CachingAdapter(CLIAdapter):
         )
         cached_entry, similarity = self._response_cache.lookup_entry(key)
 
-        if cached_entry and cached_entry.verified:
+        if multimodal_context is None and cached_entry and cached_entry.verified:
             logger.info(
                 "Response cache hit (similarity=%.3f) for session %s -- skipping spawn",
                 similarity,
@@ -180,7 +181,7 @@ class CachingAdapter(CLIAdapter):
 
         # 4. Cache miss: delegate to inner adapter.
         # Forward ALL kwargs from the base CLIAdapter.spawn interface explicitly
-        # so that type checkers catch future drift — missing budget_multiplier
+        # so that type checkers catch future drift - missing budget_multiplier
         # or system_addendum silently broke retry budgets and role-scoped
         # system prompts.
         return self._inner.spawn(
@@ -193,6 +194,7 @@ class CachingAdapter(CLIAdapter):
             task_scope=task_scope,
             budget_multiplier=budget_multiplier,
             system_addendum=system_addendum,
+            multimodal_context=multimodal_context,
         )
 
     def name(self) -> str:

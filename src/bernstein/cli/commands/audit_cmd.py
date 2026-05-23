@@ -92,8 +92,8 @@ def show_cmd(limit: int) -> None:
     table.add_column("Resource")
 
     for ev in events:
-        ts = str(ev.get("timestamp", "—"))[:19]
-        event_type = str(ev.get("event_type", "—"))
+        ts = str(ev.get("timestamp", "-"))[:19]
+        event_type = str(ev.get("event_type", "-"))
         actor = str(ev.get("actor", ""))
         resource = f"{ev.get('resource_type', '')}/{ev.get('resource_id', '')}"
         table.add_row(ts, event_type, actor, resource)
@@ -105,9 +105,21 @@ def show_cmd(limit: int) -> None:
 
 @audit_group.command("seal")
 @click.option("--anchor-git", is_flag=True, default=False, help="Anchor root hash as a git tag.")
-def seal_cmd(anchor_git: bool) -> None:
-    """Compute a Merkle root across all audit log files and store the seal."""
-    from bernstein.core.merkle import anchor_to_git, compute_seal, save_seal
+@click.option(
+    "--allow-broken-chain",
+    is_flag=True,
+    default=False,
+    help="Seal even if the HMAC chain is broken (forensic capture of a corrupted log).",
+)
+def seal_cmd(anchor_git: bool, allow_broken_chain: bool) -> None:
+    """Compute a Merkle root across all audit log files and store the seal.
+
+    By default the HMAC chain is verified first and a broken chain aborts
+    the seal, so re-sealing cannot launder a pre-existing tamper into a
+    fresh root. Pass --allow-broken-chain to seal a known-corrupted log on
+    purpose (forensic evidence capture during the recovery procedure).
+    """
+    from bernstein.core.merkle import ChainBrokenError, anchor_to_git, compute_seal, save_seal
 
     if not AUDIT_DIR.is_dir():
         console.print(f"[red]Audit directory not found:[/red] {AUDIT_DIR}")
@@ -115,9 +127,16 @@ def seal_cmd(anchor_git: bool) -> None:
         raise SystemExit(1)
 
     try:
-        _tree, seal = compute_seal(AUDIT_DIR)
+        _tree, seal = compute_seal(AUDIT_DIR, verify_chain=not allow_broken_chain)
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")
+        raise SystemExit(1) from None
+    except ChainBrokenError as exc:
+        console.print(f"[red]Refusing to seal: the HMAC chain is broken.[/red]\n  {exc}")
+        console.print(
+            "[dim]Run 'bernstein audit verify --hmac-only' to locate the break. "
+            "To seal a known-corrupted log for forensics, re-run with --allow-broken-chain.[/dim]"
+        )
         raise SystemExit(1) from None
 
     seal_path = save_seal(seal, MERKLE_DIR)
@@ -138,8 +157,11 @@ def seal_cmd(anchor_git: bool) -> None:
     table.add_row("Root hash", str(seal["root_hash"]))
     table.add_row("Leaves", str(seal["leaf_count"]))
     table.add_row("Algorithm", str(seal["algorithm"]))
+    table.add_row("Scheme", str(seal.get("scheme", 1)))
     table.add_row("Sealed at", str(seal["sealed_at_iso"]))
     table.add_row("Seal file", str(seal_path))
+    if allow_broken_chain:
+        console.print("[yellow]Sealed WITHOUT chain verification (--allow-broken-chain).[/yellow]")
     console.print(table)
 
     if anchor_git:
@@ -269,11 +291,12 @@ def verify_hmac_cmd() -> None:
     "--standard",
     "standard",
     default=None,
-    type=click.Choice(["ai-act", "dora", "finos-aigf"]),
+    type=click.Choice(["ai-act"]),
     help=(
         "Emit a one-command compliance evidence pack mapped to the chosen "
-        "regulatory standard (issue #1316). 'ai-act' has a fleshed-out "
-        "control map; 'dora' and 'finos-aigf' ship as TODO stubs at MVP."
+        "regulatory standard (issue #1316). 'ai-act' is the only standard "
+        "with a reviewed control map at MVP; DORA and FINOS AIGF are tracked "
+        "under #1316 and will be added once their clause maps are validated."
     ),
 )
 @click.option(
@@ -660,7 +683,7 @@ def _run_standard_export(
     console.print()
     console.print(
         Panel(
-            f"[bold]Compliance Evidence Pack — {standard}[/bold]",
+            f"[bold]Compliance Evidence Pack - {standard}[/bold]",
             border_style="green",
             expand=False,
         ),
@@ -1181,7 +1204,7 @@ def slice_cmd(from_hmac: str | None, to_hmac: str | None, output: str) -> None:
 
     \b
     Foundation for time-travel replay.  The output is byte-stable
-    JSONL — each line is sort-keys-serialised — so downstream replayers
+    JSONL - each line is sort-keys-serialised - so downstream replayers
     can hash the slice directly.  The HMAC chain inside the slice is
     re-verified before writing; a structural mismatch aborts the export.
 
@@ -1225,7 +1248,7 @@ def slice_cmd(from_hmac: str | None, to_hmac: str | None, output: str) -> None:
     table.add_row("Events", str(result.event_count))
     table.add_row("From", result.from_hmac or "(genesis)")
     table.add_row("To", result.to_hmac or "(latest)")
-    table.add_row("Source files", ", ".join(result.source_files) or "—")
+    table.add_row("Source files", ", ".join(result.source_files) or "-")
     table.add_row("Output", str(out_path))
     console.print(table)
     console.print()
@@ -1382,12 +1405,15 @@ def _is_safe_audit_dir(audit_dir: Path) -> tuple[bool, str]:
         resolved = audit_dir.resolve()
     except OSError as exc:
         return False, f"cannot resolve {audit_dir}: {exc}"
-    # Reject tmpfs-style paths the operator almost certainly didn't mean.
-    suspicious_prefixes = ("/dev/", "/proc/", "/sys/")
+    # Reject pseudo-filesystem paths the operator almost certainly didn't
+    # mean. A symlink to /proc resolves to exactly "/proc" (no trailing
+    # slash), so we must refuse both the bare mount root and anything under
+    # it -- while still allowing lookalike siblings such as /procurement.
+    suspicious_roots = ("/dev", "/proc", "/sys")
     s = str(resolved)
-    for pref in suspicious_prefixes:
-        if s.startswith(pref):
-            return False, f"refusing to operate on {pref}* path: {resolved}"
+    for root in suspicious_roots:
+        if s == root or s.startswith(root + "/"):
+            return False, f"refusing to operate on {root}* path: {resolved}"
     return True, ""
 
 
@@ -1438,7 +1464,7 @@ def _plan_archive(
                 continue
         if corrupt_only and path.name not in corrupt:
             continue
-        # Pick a reason — corrupt wins over before-date if both flags set.
+        # Pick a reason - corrupt wins over before-date if both flags set.
         if corrupt_only and path.name in corrupt:
             reason_by_name[path.name] = _ARCHIVE_REASON_CORRUPT
         elif before_date is not None:
@@ -1616,7 +1642,7 @@ def archive_cmd(
         dest = archive_dir / path.name
         if dest.exists():
             console.print(
-                f"[red]Refusing to overwrite[/red] {dest} — a file with the same name "
+                f"[red]Refusing to overwrite[/red] {dest} - a file with the same name "
                 "already exists in the archive directory. Aborting before moving "
                 "anything else.",
             )
@@ -1629,7 +1655,7 @@ def archive_cmd(
         try:
             path.rename(dest)
         except OSError:
-            # Cross-device move fallback — copy then unlink.
+            # Cross-device move fallback - copy then unlink.
             import shutil
 
             try:

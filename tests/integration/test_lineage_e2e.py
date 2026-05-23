@@ -17,7 +17,6 @@ import hashlib
 import json
 import shutil
 import sys
-from dataclasses import asdict
 from pathlib import Path
 
 from bernstein.cli.commands._lineage_v1_helpers import read_entries, reindex
@@ -79,9 +78,11 @@ def _entry(
 
 def _append(log_path: Path, entry: LineageEntry, agent: _Agent) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("a") as f:
-        f.write(json.dumps(asdict(entry), sort_keys=True) + "\n")
+    # Append the canonical JCS bytes the real ``LineageStore.append`` writes;
+    # the gate binds verification to the on-disk bytes (issue #1848).
     canonical = canonicalise(entry)
+    with log_path.open("ab") as f:
+        f.write(canonical + b"\n")
     jws = sign_detached(canonical, agent.priv, kid=agent.kid)
     digest = hashlib.sha256(entry.artefact_path.encode()).hexdigest()
     sig_dir = log_path.parent / "signatures" / digest[:2] / digest
@@ -93,8 +94,9 @@ def _append(log_path: Path, entry: LineageEntry, agent: _Agent) -> None:
 def _append_signed(log_path: Path, entry: LineageEntry, jws: str) -> None:
     """Append a pre-signed entry (used when steward.build_merge_entry already signed)."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("a") as f:
-        f.write(json.dumps(asdict(entry), sort_keys=True) + "\n")
+    # Canonical bytes on disk so the gate's byte-canonical check passes.
+    with log_path.open("ab") as f:
+        f.write(canonicalise(entry) + b"\n")
     digest = hashlib.sha256(entry.artefact_path.encode()).hexdigest()
     sig_dir = log_path.parent / "signatures" / digest[:2] / digest
     sig_dir.mkdir(parents=True, exist_ok=True)
@@ -252,11 +254,11 @@ def test_path_traversal_artefact_in_log_does_not_crash_gate(tmp_path: Path) -> N
         assert log.parent in sig.parents
     result = check(log_path=log, agent_cards_dir=cards)
     # Whether the gate reports OK or FAIL is policy; the contract here
-    # is "no escape" — the test is green if the rglob assertion holds.
+    # is "no escape" - the test is green if the rglob assertion holds.
     assert isinstance(result.ok, bool)
 
 
-# ── 6. Replay attack — duplicate entries by hash detection ──────────────────
+# ── 6. Replay attack - duplicate entries by hash detection ──────────────────
 
 
 def test_replay_attack_duplicate_entry_hash_is_idempotent(tmp_path: Path) -> None:
@@ -267,7 +269,7 @@ def test_replay_attack_duplicate_entry_hash_is_idempotent(tmp_path: Path) -> Non
     a = _Agent("agent:a", "k1")
     _write_card(cards, a)
     g = _entry(a, "x.py", _h("1"), [], ts_ns=1)
-    # Write the same entry twice — same body, same hash.
+    # Write the same entry twice - same body, same hash.
     _append(log, g, a)
     _append(log, g, a)
     # Same content_hash + same parent_hash + same ts → idempotent replay,

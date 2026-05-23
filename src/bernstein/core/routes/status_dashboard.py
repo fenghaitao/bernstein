@@ -10,9 +10,10 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
+from bernstein.core.defaults import DASHBOARD_STATIC_ASSETS
 from bernstein.core.home import BernsteinHome, resolve_config_bundle
 from bernstein.core.prometheus import get_transition_reason_histogram
 from bernstein.core.runtime_state import (
@@ -23,6 +24,7 @@ from bernstein.core.runtime_state import (
     read_supervisor_state,
 )
 from bernstein.core.worktree import WorktreeManager
+from bernstein.dashboard import STATIC_DIR
 
 _SDD_NOT_CONFIGURED = "sdd_dir not configured"
 
@@ -172,6 +174,7 @@ def _safe_call(label: str, fn: Any, default: Any) -> Any:
     """
     try:
         return fn()
+    # bot-ack: pre-existing-1723 (defensive wrapper: any failure must yield default)
     except Exception as exc:
         logger.warning("status field %r failed: %s: %s", label, type(exc).__name__, exc)
         return default
@@ -669,6 +672,7 @@ def _load_live_costs(request: Request) -> dict[str, Any]:
             "per_agent": per_agent,
             "daily_costs": daily,
         }
+    # bot-ack: pre-existing-1723 (cost summary fallback for dashboard)
     except Exception:
         return _empty
 
@@ -781,6 +785,7 @@ def _summarise_lineage(sdd_dir: Any) -> dict[str, Any]:
                 except (json.JSONDecodeError, TypeError, ValueError):
                     continue
         forks = detect_forks(entries)
+    # bot-ack: pre-existing-1723 (defensive: never break /status on lineage scan)
     except Exception:  # pragma: no cover - defensive: never break /status
         return {}
     return {
@@ -853,6 +858,7 @@ def status_dashboard(request: Request) -> JSONResponse:
     payload["alerts"] = build_alerts(store, live_agents, total_spent, now, agent_snapshots)
     try:
         payload["bandit"] = _bandit_state_payload(store)
+    # bot-ack: pre-existing-1723 (bandit payload must not break /status)
     except Exception as exc:
         logger.warning("status bandit payload failed: %s: %s", type(exc).__name__, exc)
         payload["bandit"] = {"mode": "bandit", "active": True, "error": "unavailable"}
@@ -953,6 +959,7 @@ def bandit_routing_stats(request: Request) -> JSONResponse:
     store = _get_store(request)
     try:
         return JSONResponse(content=_bandit_state_payload(store))
+    # bot-ack: pre-existing-1723 (route-level fallback to a 500 envelope)
     except Exception as exc:
         return _internal_error_response(
             "Failed to read routing bandit state",
@@ -974,6 +981,29 @@ def dashboard_page() -> HTMLResponse:
     html_path = TEMPLATE_DIR / "index.html"
     html = html_path.read_text(encoding="utf-8")
     return HTMLResponse(content=html)
+
+
+@router.get("/dashboard/static/{asset_name}")
+def dashboard_static_asset(asset_name: str) -> Response:
+    """Serve allow-listed static assets used by the web dashboard."""
+    asset = DASHBOARD_STATIC_ASSETS.get(asset_name)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="Dashboard asset not found")
+
+    asset_path = STATIC_DIR / asset.file_name
+    try:
+        content = asset_path.read_bytes()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Dashboard asset not found") from exc
+
+    return Response(
+        content=content,
+        media_type=asset.media_type,
+        headers={
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 def _populate_agents_from_snapshots(agents: dict[str, Any], agent_snapshots: dict[str, dict[str, Any]]) -> None:

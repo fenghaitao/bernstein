@@ -11,6 +11,7 @@ reproduces today's single-pass cross-model verifier behaviour.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -22,7 +23,7 @@ from bernstein.core.quality.review_pipeline.schema import (
     StageSpec,
 )
 
-#: Final verdict literal — matches CrossModelVerdict for drop-in compatibility.
+#: Final verdict literal - matches CrossModelVerdict for drop-in compatibility.
 FinalVerdict = Literal["approve", "request_changes"]
 
 
@@ -57,7 +58,7 @@ class StageVerdict:
         verdict: ``approve`` or ``request_changes``.
         approve_count: Number of agents that approved.
         total_count: Total agents that voted (excludes adapter failures
-            already filtered upstream — those default to ``approve``).
+            already filtered upstream - those default to ``approve``).
         pass_score: Fraction of approval weight, in [0.0, 1.0].
         agents: Per-agent verdicts, in stage spawn order.
         feedback: Short summary of how the verdict was reached.
@@ -81,7 +82,7 @@ class PipelineVerdict:
         feedback: Short pipeline-level summary.
         pass_score: Fraction of stages that passed, in [0.0, 1.0].
         stages: All stage verdicts in execution order.
-        block_on_fail: Mirrors :attr:`ReviewPipeline.block_on_fail` — drives
+        block_on_fail: Mirrors :attr:`ReviewPipeline.block_on_fail` - drives
             janitor block-on-fail behaviour.
     """
 
@@ -190,7 +191,7 @@ def _apply_strategy(
 
     if strategy == "majority":
         score = approves / total
-        # Strict majority — half is not enough, matches "more approve than
+        # Strict majority - half is not enough, matches "more approve than
         # reject" semantics; ties fall to request_changes (safe default).
         verdict = "approve" if approves > total - approves else "request_changes"
         return score, verdict
@@ -212,7 +213,7 @@ def _weighted(
         total_weight += weight
         if v.verdict == "approve":
             approve_weight += weight
-    if total_weight == 0.0:
+    if math.isclose(total_weight, 0.0, abs_tol=1e-12):
         # No weights match → fall back to fraction of approvals.
         approves = sum(1 for v in verdicts if v.verdict == "approve")
         score = approves / len(verdicts)

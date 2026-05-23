@@ -11,7 +11,7 @@ on:
 permissions: {}
 
 jobs:
-  # Protocol compatibility gate — blocks release if breaking changes found
+  # Protocol compatibility gate - blocks release if breaking changes found
   protocol-gate:
     name: Protocol Compatibility Gate
     runs-on: ubuntu-latest
@@ -20,7 +20,7 @@ jobs:
       contents: read
     steps:
       - name: Harden runner (audit mode)
-        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -34,22 +34,25 @@ jobs:
         env:
           RELEASE_REF: ${{ github.ref_name }}
         run: |
+          set -euo pipefail
+
           # Install test dependencies
-          uv pip install mcp a2a || true
+          uv pip install mcp a2a
 
           # Run protocol tests
-          uv run pytest tests/protocol/ -v 2>&1 | tee test-output.log || true
+          set +e
+          uv run pytest tests/protocol/ -v 2>&1 | tee test-output.log
+          pytest_exit_code=${PIPESTATUS[0]}
+          set -e
 
           # Generate results
-          python << 'EOF'
+          PYTEST_EXIT_CODE="$pytest_exit_code" python << 'EOF'
           import json
           import os
 
           results = []
-          test_output = open('test-output.log').read()
-
-          # Simplified: mark as pass/fail based on pytest output
-          status = "pass" if "FAILED" not in test_output else "fail"
+          pytest_exit_code = int(os.environ["PYTEST_EXIT_CODE"])
+          status = "pass" if pytest_exit_code == 0 else "fail"
 
           result = {
             "python": "3.12",
@@ -69,6 +72,8 @@ jobs:
               json.dump(compat_data, f, indent=2)
           EOF
 
+          exit "$pytest_exit_code"
+
       - name: Check against baseline
         run: |
           python scripts/check_compatibility.py \
@@ -85,10 +90,10 @@ jobs:
           fi
 
           if grep -q '"breaking_changes": \[\]' gate-check.log; then
-            echo "✅ Gate passed — no breaking changes detected"
+            echo "✅ Gate passed - no breaking changes detected"
             exit 0
           else
-            echo "❌ Release blocked — breaking changes detected"
+            echo "❌ Release blocked - breaking changes detected"
             echo "To proceed: include 'ACKNOWLEDGE_BREAKING_CHANGES' in commit message"
             exit 1
           fi
@@ -102,7 +107,7 @@ jobs:
       contents: read
     steps:
       - name: Harden runner (audit mode)
-        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -113,6 +118,8 @@ jobs:
           enable-uv-cache: "false"
       - name: Quick lint check (full tests already passed in CI)
         run: uv run ruff check src/
+      - name: Release test guard
+        run: uv run python scripts/run_tests.py -k release -x
 
   version-check:
     name: Verify tag matches pyproject.toml
@@ -122,7 +129,7 @@ jobs:
       contents: read
     steps:
       - name: Harden runner (audit mode)
-        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -148,7 +155,7 @@ jobs:
       contents: read
     steps:
       - name: Harden runner (audit mode)
-        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -177,7 +184,7 @@ jobs:
       url: https://pypi.org/p/bernstein
     steps:
       - name: Harden runner (audit mode)
-        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -210,7 +217,7 @@ jobs:
       contents: write
     steps:
       - name: Harden runner (audit mode)
-        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -224,11 +231,22 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+
           TAG="${GITHUB_REF#refs/tags/}"
-          gh release create "$TAG" dist/* \
-            --title "$TAG" \
-            --generate-notes \
-            || echo "Release already exists"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --title "$TAG" \
+              --generate-notes
+          fi
+
+          asset_count=$(gh release view "$TAG" --json assets --jq '.assets | length')
+          if [ "$asset_count" -eq 0 ]; then
+            echo "::error::Release $TAG has no assets"
+            exit 1
+          fi
 
   publish-npm:
     name: Publish npm wrapper
@@ -239,7 +257,7 @@ jobs:
       contents: read
     steps:
       - name: Harden runner (audit mode)
-        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -256,14 +274,7 @@ jobs:
           VERSION="${GITHUB_REF#refs/tags/v}"
           cd packaging/npm
           npm version "$VERSION" --no-git-tag-version --allow-same-version
-      # Absorb npm-publish failures so they don't fail the tag-triggered
-      # publish workflow (matching the behaviour in auto-release.yml).
-      # NPM_TOKEN currently lacks publish rights for bernstein-orchestrator
-      # after the sipyourdrink-ltd repo transfer; until a fresh token is
-      # provisioned, the npm wrapper stays at its last successful version
-      # while PyPI / GHCR / GitHub Release continue shipping.
       - name: Publish to npm
-        continue-on-error: true
         env:
           # packaging/npm/.npmrc uses ${NPM_TOKEN} for interpolation, so
           # both variables must be set. NODE_AUTH_TOKEN is kept for
@@ -271,8 +282,9 @@ jobs:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          cd packaging/npm
-          if ! npm publish --access public; then
-            echo "::warning::npm publish failed — continuing release. Likely cause: NPM_TOKEN needs to be re-issued with publish rights for bernstein-orchestrator."
+          if [ -z "${NPM_TOKEN:-}" ]; then
+            echo "::error::NPM_TOKEN is required for npm publish"
+            exit 1
           fi
-
+          cd packaging/npm
+          npm publish --access public

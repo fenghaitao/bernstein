@@ -40,7 +40,7 @@ jobs:
       enabled: ${{ steps.gate.outputs.enabled }}
     steps:
       - name: Harden runner (audit mode)
-        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
       - id: gate
@@ -54,10 +54,10 @@ jobs:
           set -euo pipefail
           if [[ -n "${EVAL_ENABLED:-}" ]]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
-            echo "EVAL_ENABLED secret detected — running full eval path."
+            echo "EVAL_ENABLED secret detected - running full eval path."
           elif [[ "${FORCE_RUN:-}" == "true" ]]; then
             echo "enabled=smoke" >> "$GITHUB_OUTPUT"
-            echo "Manual dispatch with force_run=true — running smoke path."
+            echo "Manual dispatch with force_run=true - running smoke path."
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
             echo "EVAL_ENABLED unset; nothing to do. Set the secret to enable."
@@ -71,7 +71,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Harden runner (audit mode)
-        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -85,7 +85,7 @@ jobs:
         run: uv python install 3.12
 
       - name: Sync dependencies
-        # Smoke path needs no extras — synthetic entry, no HuggingFace fetch.
+        # Smoke path needs no extras - synthetic entry, no HuggingFace fetch.
         run: uv sync --frozen
 
       - name: Produce synthetic leaderboard entry
@@ -115,9 +115,12 @@ jobs:
       EVAL_BUDGET_USD: "5"
       # Adapter set to evaluate. Override via repo variable EVAL_ADAPTERS.
       EVAL_ADAPTERS: ${{ vars.EVAL_ADAPTERS || 'claude,codex,ollama' }}
+      # Route unexpected eval-orchestration crashes to the operator error
+      # sink. No-op when the secret is unset, so forks stay green.
+      BERNSTEIN_TELEMETRY_DSN: ${{ secrets.GLITCHTIP_DSN }}
     steps:
       - name: Harden runner (audit mode)
-        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6

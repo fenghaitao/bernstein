@@ -23,7 +23,7 @@
 # single comment with the per-module table.
 #
 # `continue-on-error: true` is set on the matrix jobs while thresholds
-# stabilise — this PR sets up the gate, humans tighten it in follow-ups.
+# stabilise - this PR sets up the gate, humans tighten it in follow-ups.
 name: Mutation (fixed critical paths)
 
 on:
@@ -87,7 +87,7 @@ jobs:
           - config_seed_parser
     steps:
       - name: Harden runner (audit mode)
-        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
       - name: Checkout
@@ -150,7 +150,7 @@ jobs:
       pull-requests: write
     steps:
       - name: Harden runner (audit mode)
-        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
       - name: Checkout
@@ -205,7 +205,7 @@ jobs:
                 if (!r.baseline_ok) notes.push('baseline tests failed');
                 if (r.budget_exceeded) notes.push('budget exceeded');
                 if (r.survivors && r.survivors.length) notes.push(`${r.survivors.length} survivors`);
-                body += `| ${r.module} | ${rate} | ${thr} | ${counts} | ${icon(r)} | ${notes.join('; ') || '—'} |\n`;
+                body += `| ${r.module} | ${rate} | ${thr} | ${counts} | ${icon(r)} | ${notes.join('; ') || '-'} |\n`;
               }
               const failing = rows.filter(r => !r.passed);
               if (failing.length) {

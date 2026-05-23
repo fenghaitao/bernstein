@@ -1,29 +1,40 @@
 """Convert dead-letter and post-mortem incidents into regression eval cases.
 
 Implements the *incident-to-eval-synthesis* pattern. Each terminally
-failed task or orchestrator post-mortem becomes one minimal,
-reproducible eval case under ``src/bernstein/eval/cases/incidents/``.
-The next agent must pass these cases or the quality gate blocks merge.
+failed task, orchestrator post-mortem, or CI-failure post-mortem
+becomes one minimal, reproducible eval case under
+``src/bernstein/eval/cases/incidents/``. The next agent must pass
+these cases or the quality gate blocks merge.
 
 Pipeline
 --------
-1. **Read** new incidents from the dead-letter queue and post-mortem
-   reports.
-2. **Minimise** the trigger — keep only the smallest prompt / config /
+1. **Read** new incidents from the dead-letter queue, post-mortem
+   reports, and CI-failure post-mortems scraped from merged PRs.
+2. **Minimise** the trigger - keep only the smallest prompt / config /
    tool sequence that would reproduce the failure. Long tracebacks are
    collapsed to their first useful frames.
 3. **Redact** with the existing PII / secret scanner. If a finding
    cannot be redacted safely the case is dropped.
-4. **De-duplicate** by stable content hash so re-running the synthesiser
-   over the same DLQ does not produce duplicate cases.
+4. **De-duplicate** by stable content hash and source-incident key so
+   re-running the synthesiser over the same DLQ does not produce
+   duplicate cases.
 5. **Emit** YAML files with ``id``, ``severity``, ``prompt``,
    ``expected_outcome`` and ``source_incident`` fields.
 
 Severity routing follows the ticket convention:
 
-* ``P0`` — security / data-loss / prompt-injection. Blocks merge.
-* ``P1`` — correctness / orchestration regressions. Warn-only.
-* ``P2`` — flaky / transient. Warn-only.
+* ``P0`` - security / data-loss / prompt-injection. Blocks merge.
+* ``P1`` - correctness / orchestration regressions. Warn-only.
+* ``P2`` - flaky / transient. Warn-only.
+
+CI-failure post-mortems
+-----------------------
+A merged PR that needed 2+ fix-up commits between the original feature
+commit and merge is treated as a CI-failure post-mortem. The scraper
+in ``scripts/scrape_ci_postmortems.py`` emits one record per such PR;
+``IncidentSynthesizer.synthesize_from_ci_postmortem`` converts it to
+a P1 (warn-only) regression case keyed on
+``ci-postmortem:<PR#>:<commit-sha>``.
 
 The CLI (``bernstein eval sync-incidents``) and the
 ``run_incident_eval_gate`` function below are the two entry points.
@@ -49,6 +60,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "CIFailurePostmortem",
+    "GlitchTipIncident",
     "IncidentEvalCase",
     "IncidentSyncResult",
     "IncidentSynthesizer",
@@ -124,6 +137,84 @@ class IncidentEvalCase:
         return d
 
 
+@dataclass(frozen=True, slots=True)
+class CIFailurePostmortem:
+    """A CI-failure post-mortem mined from a merged pull request.
+
+    A merged PR is treated as a post-mortem when it needed 2+ fix-up
+    commits between the original feature commit and merge. Each such
+    PR yields exactly one ``CIFailurePostmortem`` instance, which the
+    synthesizer turns into a P1 regression eval case.
+
+    Attributes:
+        pr_number: Pull-request number on the host repository.
+        commit_sha: The merge commit (or last fix-up) SHA. Used together
+            with ``pr_number`` as the dedup key.
+        failing_test: Identifier of the CI check / test that failed,
+            e.g. ``"pytest::tests/unit/eval/test_foo.py::test_bar"`` or
+            ``"ruff"``. Empty string if unknown.
+        error_line: Single representative line lifted from the failing
+            CI log. Empty string if unavailable.
+        fixup_commits: Subjects of the fix-up commits, in chronological
+            order. At least two entries are required for the PR to
+            qualify as a post-mortem; the synthesizer accepts any
+            non-empty tuple to stay decoupled from the scraper's exact
+            threshold.
+    """
+
+    pr_number: int
+    commit_sha: str
+    failing_test: str = ""
+    error_line: str = ""
+    fixup_commits: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class GlitchTipIncident:
+    """An unresolved GlitchTip issue mined from the read-side API.
+
+    One record per unique GlitchTip issue, emitted by
+    ``scripts/scrape_glitchtip_events.py``. The synthesiser turns each
+    one into a P1 (warn-only) regression eval case keyed on
+    ``glitchtip-issue:<issue_id>``.
+
+    Attributes:
+        issue_id: Stable GlitchTip issue identifier (numeric or short id).
+            Used together with the ``glitchtip-issue:`` prefix as the
+            dedup key.
+        project_slug: GlitchTip project slug the issue belongs to.
+        exception_type: Top-level exception class name from the latest
+            event (e.g. ``RuntimeError``). Empty when unavailable.
+        exception_value: One-line message paired with the exception
+            type. Trimmed by the scraper before this dataclass is built.
+        top_frame_path: File path of the deepest in-app stack frame.
+            Empty when no stacktrace was attached to the event.
+        top_frame_line: Line number of the deepest in-app frame. ``0``
+            when unavailable.
+        first_seen: ISO8601 timestamp of the first event for the issue.
+        last_seen: ISO8601 timestamp of the most recent event.
+        event_count: Total number of events seen for the issue.
+        environment: Sentry-protocol ``environment`` tag (``production``,
+            ``staging``, etc.). Empty when not tagged.
+        release: Sentry-protocol ``release`` tag. Empty when not tagged.
+        title: Operator-visible issue title, used by the wiring-probe
+            allow-list filter. Empty when unavailable.
+    """
+
+    issue_id: str
+    project_slug: str = ""
+    exception_type: str = ""
+    exception_value: str = ""
+    top_frame_path: str = ""
+    top_frame_line: int = 0
+    first_seen: str = ""
+    last_seen: str = ""
+    event_count: int = 0
+    environment: str = ""
+    release: str = ""
+    title: str = ""
+
+
 @dataclass(slots=True)
 class IncidentSyncResult:
     """Outcome of one synthesiser pass.
@@ -175,29 +266,83 @@ class IncidentSynthesizer:
         Returns:
             Aggregated :class:`IncidentSyncResult`.
         """
-        existing_ids = self._load_existing_ids()
+        existing_ids, existing_sources = self._load_existing_state()
         result = IncidentSyncResult(dry_run=dry_run)
 
         for case in self._iter_dlq_cases():
-            self._emit(case, existing_ids, result, dry_run=dry_run)
+            self._emit(case, existing_ids, existing_sources, result, dry_run=dry_run)
         for case in self._iter_postmortem_cases():
-            self._emit(case, existing_ids, result, dry_run=dry_run)
+            self._emit(case, existing_ids, existing_sources, result, dry_run=dry_run)
+        for case in self._iter_ci_postmortem_cases():
+            self._emit(case, existing_ids, existing_sources, result, dry_run=dry_run)
+        for case in self._iter_glitchtip_cases():
+            self._emit(case, existing_ids, existing_sources, result, dry_run=dry_run)
         return result
 
     def synthesize_from_dlq_entry(self, entry: DLQEntry) -> IncidentEvalCase | None:
         """Build a single eval case from a DLQ entry.
 
-        Returns ``None`` when redaction fails. Pure function — does not
+        Returns ``None`` when redaction fails. Pure function - does not
         touch the filesystem.
         """
-        return self._case_from_dlq(entry)
+        return self._synthesize_eval_case(entry)
+
+    def synthesize_from_ci_postmortem(self, pm: CIFailurePostmortem) -> IncidentEvalCase | None:
+        """Build a single eval case from a CI-failure post-mortem.
+
+        Returns ``None`` when redaction fails or the post-mortem is
+        empty. Pure function - does not touch the filesystem.
+        """
+        return self._synthesize_eval_case(pm)
+
+    def synthesize_from_glitchtip_incident(
+        self,
+        incident: GlitchTipIncident,
+    ) -> IncidentEvalCase | None:
+        """Build a single eval case from a GlitchTip incident.
+
+        Returns ``None`` when redaction fails or the incident is empty.
+        Pure function - does not touch the filesystem.
+        """
+        return self._synthesize_eval_case(incident)
+
+    def _synthesize_eval_case(
+        self,
+        incident: object,
+        *,
+        source_path: Path | None = None,
+    ) -> IncidentEvalCase | None:
+        """Dispatch on the incident shape and produce a single eval case.
+
+        This is the single seam every input type flows through. New
+        incident shapes plug in here. ``incident`` is typed as
+        :class:`object` so any of the supported variants
+        (:class:`DLQEntry`, :class:`CIFailurePostmortem`,
+        :class:`GlitchTipIncident`, or the raw post-mortem
+        ``dict[str, Any]``) can be passed without pyright complaining
+        about overlapping isinstance branches.
+        """
+        if isinstance(incident, DLQEntry):
+            return self._case_from_dlq(incident)
+        if isinstance(incident, CIFailurePostmortem):
+            return self._case_from_ci_postmortem(incident)
+        if isinstance(incident, GlitchTipIncident):
+            return self._case_from_glitchtip_incident(incident)
+        if isinstance(incident, dict):
+            if source_path is None:
+                msg = "post-mortem dicts require a source_path"
+                raise ValueError(msg)
+            raw_dict: dict[str, Any] = dict(incident)  # type: ignore[arg-type]
+            return self._case_from_postmortem(raw_dict, source_path=source_path)
+        msg = f"unsupported incident type: {type(incident).__name__}"
+        raise TypeError(msg)
 
     # ------------------------------------------------------------------ readers
 
     def _iter_dlq_cases(self) -> Iterable[IncidentEvalCase]:
         dlq = DeadLetterQueue(self._sdd)
         for entry in dlq.list_entries(limit=10_000):
-            case = self._case_from_dlq(entry)
+            case = self._synthesize_eval_case(entry)
             if case is not None:
                 yield case
 
@@ -213,7 +358,55 @@ class IncidentSynthesizer:
                 continue
             if not isinstance(raw, dict):
                 continue
-            case = self._case_from_postmortem(raw, source_path=path)
+            case = self._synthesize_eval_case(raw, source_path=path)
+            if case is not None:
+                yield case
+
+    def _iter_ci_postmortem_cases(self) -> Iterable[IncidentEvalCase]:
+        """Yield cases from JSON records emitted by ``scrape_ci_postmortems``.
+
+        Records live under ``.sdd/reports/ci_postmortems/*.json``. Each
+        file is one record matching the :class:`CIFailurePostmortem`
+        schema. Records lacking the required ``pr_number`` /
+        ``commit_sha`` fields are skipped.
+        """
+        ci_dir = self._sdd / "reports" / "ci_postmortems"
+        if not ci_dir.is_dir():
+            return
+        for path in sorted(ci_dir.glob("*.json")):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.debug("skipping unreadable ci postmortem %s: %s", path, exc)
+                continue
+            pm = _ci_postmortem_from_dict(raw)
+            if pm is None:
+                continue
+            case = self._synthesize_eval_case(pm)
+            if case is not None:
+                yield case
+
+    def _iter_glitchtip_cases(self) -> Iterable[IncidentEvalCase]:
+        """Yield cases from JSON records emitted by ``scrape_glitchtip_events``.
+
+        Records live under ``.sdd/reports/glitchtip_events/*.json``.
+        Each file is one record matching the :class:`GlitchTipIncident`
+        schema. Records lacking the required ``glitchtip_issue_id``
+        field are skipped.
+        """
+        gt_dir = self._sdd / "reports" / "glitchtip_events"
+        if not gt_dir.is_dir():
+            return
+        for path in sorted(gt_dir.glob("*.json")):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.debug("skipping unreadable glitchtip record %s: %s", path, exc)
+                continue
+            incident = _glitchtip_incident_from_dict(raw)
+            if incident is None:
+                continue
+            case = self._synthesize_eval_case(incident)
             if case is not None:
                 yield case
 
@@ -281,20 +474,95 @@ class IncidentSynthesizer:
             created_at=time.time(),
         )
 
+    def _case_from_ci_postmortem(self, pm: CIFailurePostmortem) -> IncidentEvalCase | None:
+        if not pm.fixup_commits:
+            return None
+        if not pm.commit_sha:
+            return None
+
+        source = f"ci-postmortem:{pm.pr_number}:{pm.commit_sha}"
+        tags: set[str] = {"ci_failure", "regression"}
+        if pm.failing_test:
+            tags.add("test_failure")
+        # P1 per AC: regression, warn-only.
+        severity: Severity = "P1"
+
+        prompt_raw = _build_prompt_from_ci_postmortem(pm)
+        prompt = _redact(prompt_raw)
+        if prompt is None:
+            return None
+
+        outcome = _expected_outcome_for(severity, "ci_failure")
+        case_id = _content_id(prompt, severity, source)
+        return IncidentEvalCase(
+            id=case_id,
+            severity=severity,
+            prompt=prompt,
+            expected_outcome=outcome,
+            source_incident=source,
+            tags=tuple(sorted(tags)),
+            owner="ci-fixer",
+            created_at=time.time(),
+        )
+
+    def _case_from_glitchtip_incident(
+        self,
+        incident: GlitchTipIncident,
+    ) -> IncidentEvalCase | None:
+        """Produce a P1 (warn-only) regression case from a GlitchTip incident.
+
+        The severity is fixed at P1 per AC: a runtime exception captured
+        in production is a regression, but lacks the security-relevant
+        framing that gates merge. Operators that want to promote a class
+        to P0 can extend the routing table here in a follow-up; that is
+        explicit operator-judgement territory.
+        """
+        if not incident.issue_id:
+            return None
+
+        source = f"glitchtip-issue:{incident.issue_id}"
+        tags: set[str] = {"glitchtip", "regression", "runtime_error"}
+        if incident.exception_type:
+            tags.add(_safe_tag(incident.exception_type))
+        if incident.environment:
+            tags.add(f"env_{_safe_tag(incident.environment)}")
+        # P1 per AC: warn-only.
+        severity: Severity = "P1"
+
+        prompt_raw = _build_prompt_from_glitchtip(incident)
+        prompt = _redact(prompt_raw)
+        if prompt is None:
+            return None
+
+        outcome = _expected_outcome_for(severity, "runtime_exception")
+        case_id = _content_id(prompt, severity, source)
+        return IncidentEvalCase(
+            id=case_id,
+            severity=severity,
+            prompt=prompt,
+            expected_outcome=outcome,
+            source_incident=source,
+            tags=tuple(sorted(tags)),
+            owner="orchestrator",
+            created_at=time.time(),
+        )
+
     # ------------------------------------------------------------------ writer
 
     def _emit(
         self,
         case: IncidentEvalCase,
         existing_ids: set[str],
+        existing_sources: set[str],
         result: IncidentSyncResult,
         *,
         dry_run: bool,
     ) -> None:
-        if case.id in existing_ids:
+        if case.id in existing_ids or case.source_incident in existing_sources:
             result.skipped_duplicates += 1
             return
         existing_ids.add(case.id)
+        existing_sources.add(case.source_incident)
         result.created.append(case)
         if dry_run:
             return
@@ -309,15 +577,28 @@ class IncidentSynthesizer:
         body = _to_yaml(case)
         findings = scan_text(body)
         if findings:
-            logger.warning("incident eval case %s contains residual secrets — dropping", case.id)
+            logger.warning("incident eval case %s contains residual secrets - dropping", case.id)
             return
         path.write_text(body, encoding="utf-8")
         logger.info("incident eval case written: %s (%s)", path, case.severity)
 
-    def _load_existing_ids(self) -> set[str]:
+    def _load_existing_state(self) -> tuple[set[str], set[str]]:
+        """Return ``(case_ids, source_incident_keys)`` already on disk.
+
+        Source-incident keys give the scraper a second dedup axis: the
+        same fix-up PR re-scanned must not produce a new case even if
+        the redaction subtly shifts the content hash.
+        """
         if not self._cases_dir.is_dir():
-            return set()
-        return {p.stem for p in self._cases_dir.glob("inc-*.yaml")}
+            return set(), set()
+        ids: set[str] = set()
+        sources: set[str] = set()
+        for p in self._cases_dir.glob("inc-*.yaml"):
+            ids.add(p.stem)
+            src = _source_incident_from_yaml(p)
+            if src:
+                sources.add(src)
+        return ids, sources
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +613,7 @@ def run_incident_eval_gate(workdir: Path) -> tuple[bool, str, dict[str, int]]:
 
     Returns:
         ``(passed, detail, counts)``. ``passed`` is False when any P0
-        case has no candidate solution wired up yet — i.e. the case is
+        case has no candidate solution wired up yet - i.e. the case is
         present but the harness cannot prove regression status. The gate
         fails closed: missing harness data on a P0 incident blocks merge.
     """
@@ -426,6 +707,147 @@ def _build_prompt_from_postmortem(run_id: str, factors: list[str], snippets: lis
     return body
 
 
+def _build_prompt_from_ci_postmortem(pm: CIFailurePostmortem) -> str:
+    parts: list[str] = [
+        f"Reproduce and resolve the CI-failure regression from PR #{pm.pr_number}.",
+    ]
+    if pm.failing_test:
+        parts.append(f"Failing check: {pm.failing_test}")
+    if pm.error_line:
+        snippet = pm.error_line.strip()
+        if len(snippet) > _MAX_ERROR_LEN:
+            snippet = snippet[:_MAX_ERROR_LEN] + "..."
+        parts.append(f"Representative error line: {snippet}")
+    if pm.fixup_commits:
+        parts.append("Fix-up commits the human author needed before the PR went green:")
+        for subject in pm.fixup_commits[:8]:
+            parts.append(f"- {subject[:200]}")
+    body = "\n".join(parts)
+    if len(body) > _MAX_PROMPT_LEN:
+        body = body[:_MAX_PROMPT_LEN] + "..."
+    return body
+
+
+def _build_prompt_from_glitchtip(incident: GlitchTipIncident) -> str:
+    """Build a minimal reproduction prompt from a GlitchTip incident.
+
+    The prompt deliberately omits the GlitchTip hostname so the emitted
+    YAML never leaks operator-private infrastructure. The issue id and
+    project slug carry enough context for an operator to look up the
+    full event on their own.
+    """
+    parts: list[str] = [
+        f"Reproduce and resolve the runtime exception reported by GlitchTip issue {incident.issue_id}.",
+    ]
+    if incident.project_slug:
+        parts.append(f"Project: {incident.project_slug}")
+    if incident.exception_type:
+        head = incident.exception_type
+        if incident.exception_value:
+            value = incident.exception_value.strip()
+            if len(value) > _MAX_ERROR_LEN:
+                value = value[:_MAX_ERROR_LEN] + "..."
+            head = f"{head}: {value}"
+        parts.append(f"Exception: {head}")
+    if incident.top_frame_path:
+        frame = incident.top_frame_path
+        if incident.top_frame_line > 0:
+            frame = f"{frame}:{incident.top_frame_line}"
+        parts.append(f"Top in-app frame: {frame}")
+    if incident.environment:
+        parts.append(f"Environment: {incident.environment}")
+    if incident.release:
+        parts.append(f"Release: {incident.release}")
+    if incident.event_count > 0:
+        parts.append(f"Event count: {incident.event_count}")
+    body = "\n".join(parts)
+    if len(body) > _MAX_PROMPT_LEN:
+        body = body[:_MAX_PROMPT_LEN] + "..."
+    return body
+
+
+def _ci_postmortem_from_dict(raw: object) -> CIFailurePostmortem | None:
+    """Parse a JSON record emitted by ``scrape_ci_postmortems``.
+
+    Returns ``None`` for malformed records.
+    """
+    if not isinstance(raw, dict):
+        return None
+    data: dict[str, Any] = raw  # type: ignore[assignment]
+    pr_number: Any = data.get("pr_number")
+    commit_sha: Any = data.get("commit_sha")
+    if not isinstance(pr_number, int) or not isinstance(commit_sha, str) or not commit_sha:
+        return None
+    fixups_raw_any: Any = data.get("fixup_commits") or []
+    fixups_iter: list[Any] = list(fixups_raw_any) if isinstance(fixups_raw_any, list) else []  # type: ignore[arg-type]
+    fixups: tuple[str, ...] = tuple(str(c) for c in fixups_iter if c)
+    failing_test_raw: Any = data.get("failing_test") or ""
+    error_line_raw: Any = data.get("error_line") or ""
+    return CIFailurePostmortem(
+        pr_number=pr_number,
+        commit_sha=commit_sha,
+        failing_test=str(failing_test_raw),
+        error_line=str(error_line_raw),
+        fixup_commits=fixups,
+    )
+
+
+def _glitchtip_incident_from_dict(raw: object) -> GlitchTipIncident | None:
+    """Parse a JSON record emitted by ``scrape_glitchtip_events``.
+
+    Returns ``None`` for malformed records. The required field is
+    ``glitchtip_issue_id``; everything else has safe defaults so partial
+    records still synthesise a case (the exception type and stacktrace
+    are useful but not load-bearing for the dedup key).
+    """
+    if not isinstance(raw, dict):
+        return None
+    data: dict[str, Any] = raw  # type: ignore[assignment]
+    issue_id_raw: Any = data.get("glitchtip_issue_id")
+    if issue_id_raw is None:
+        return None
+    issue_id = str(issue_id_raw).strip()
+    if not issue_id:
+        return None
+
+    top_line_raw: Any = data.get("top_frame_line") or 0
+    try:
+        top_line = int(top_line_raw) if not isinstance(top_line_raw, bool) else 0
+    except (TypeError, ValueError):
+        top_line = 0
+
+    event_count_raw: Any = data.get("event_count") or 0
+    try:
+        event_count = int(event_count_raw) if not isinstance(event_count_raw, bool) else 0
+    except (TypeError, ValueError):
+        event_count = 0
+
+    return GlitchTipIncident(
+        issue_id=issue_id,
+        project_slug=str(data.get("project_slug") or ""),
+        exception_type=str(data.get("exception_type") or ""),
+        exception_value=str(data.get("exception_value") or ""),
+        top_frame_path=str(data.get("top_frame_path") or ""),
+        top_frame_line=top_line,
+        first_seen=str(data.get("first_seen") or ""),
+        last_seen=str(data.get("last_seen") or ""),
+        event_count=event_count,
+        environment=str(data.get("environment") or ""),
+        release=str(data.get("release") or ""),
+        title=str(data.get("title") or ""),
+    )
+
+
+def _safe_tag(value: str) -> str:
+    """Render a free-form string as a lowercase ``[a-z0-9_]`` tag.
+
+    Used so an exception class like ``ValueError`` becomes the tag
+    ``valueerror`` without colons, dots, or other YAML-hostile bytes.
+    """
+    out = re.sub(r"\W+", "_", value.strip(), flags=re.ASCII).strip("_")
+    return out.lower() or "unknown"
+
+
 def _collapse_traceback(text: str) -> str:
     """Keep only the first ``_MAX_TRACE_FRAMES`` traceback frames.
 
@@ -478,14 +900,14 @@ def _redact(text: str) -> str | None:
 
 # Conservative redaction patterns covering the high-confidence rules in
 # pii_output_gate.SECRET_RULES. Regex-only is sufficient because the
-# scanner is also regex-only — anything it flags one of these will mask.
+# scanner is also regex-only - anything it flags one of these will mask.
 _SECRET_REDACTION_RES: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"\bghp_[A-Za-z0-9]{36,}\b"),
+    re.compile(r"\bAKIA[\dA-Z]{16}\b", re.ASCII),
+    re.compile(r"\bghp_[^\W_]{36,}\b", re.ASCII),
     re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
-    re.compile(r"\bsk_(?:live|test)_[A-Za-z0-9]{16,}\b"),
+    re.compile(r"\bsk_(?:live|test)_[^\W_]{16,}\b", re.ASCII),
     re.compile(r"\beyJ[A-Za-z0-9_=\-]+?\.[A-Za-z0-9._=\-]+?\.[A-Za-z0-9._\-+/=]+\b"),
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]+?-----END [A-Z ]*PRIVATE KEY-----"),
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL),
     re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"),
     re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
     re.compile(r"\b(?:\+?\d{1,2}[ \-.])?\(?\d{3}\)?[ \-.]\d{3}[ \-.]\d{4}\b"),
@@ -538,6 +960,25 @@ def _severity_from_yaml(path: Path) -> str:
         for line in path.read_text(encoding="utf-8").splitlines():
             if line.startswith("severity:"):
                 return line.split(":", 1)[1].strip()
+    except OSError:
+        return ""
+    return ""
+
+
+def _source_incident_from_yaml(path: Path) -> str:
+    """Extract ``source_incident`` from a previously written eval-case YAML.
+
+    Quoted scalars from :func:`_yaml_scalar` are unquoted so the
+    returned value matches what the synthesizer would re-emit. Returns
+    ``""`` when the field is absent or the file is unreadable.
+    """
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("source_incident:"):
+                raw = line.split(":", 1)[1].strip()
+                if len(raw) >= 2 and raw[0] == '"' == raw[-1]:
+                    raw = raw[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+                return raw
     except OSError:
         return ""
     return ""

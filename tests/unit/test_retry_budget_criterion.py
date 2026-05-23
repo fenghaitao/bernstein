@@ -4,11 +4,14 @@ Covers budget exhaustion, criterion degradation ordering, illegal
 degradation rejection, zero-retry edge cases, and the CLI spec parser.
 
 A sibling module ``tests/unit/test_retry_budget.py`` already exists for
-the *task-level* retry budget under ``bernstein.core.cost.planned`` —
+the *task-level* retry budget under ``bernstein.core.cost.planned`` -
 this file is the criterion-aware (issue #1352) suite.
 """
 
 from __future__ import annotations
+
+import subprocess
+import sys
 
 import pytest
 
@@ -419,6 +422,20 @@ class TestParseSpec:
         assert b.retries == 2
         assert len(b.criterion_degradation) == 2
 
+    def test_rejects_adversarial_policy_without_regex_backtracking(self) -> None:
+        code = """
+from bernstein.core.cost.retry_budget import parse_retry_budget_spec
+try:
+    parse_retry_budget_spec("1, " + ("a>" * 50) + ",")
+except ValueError:
+    pass
+"""
+        subprocess.run(
+            [sys.executable, "-c", code],
+            check=True,
+            timeout=5,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Error hierarchy
@@ -492,7 +509,7 @@ class TestEndToEnd:
         d = b.consume()
         assert d.degraded_criterion is not None
         assert d.degraded_criterion.level == 2
-        # No further consumption degrades — second consume has no
+        # No further consumption degrades - second consume has no
         # criterion at index 1.
         d2 = b.consume()
         assert d2.should_retry

@@ -2,10 +2,10 @@
 
 Five attack classes:
 
-  1. Replay attack — old entry replayed into a new run.
-  2. Substitution attack — swap two entries' signatures.
-  3. Privilege escalation — worker writes a merge entry.
-  4. Forge attack — synthetic JWS with fake kid.
+  1. Replay attack - old entry replayed into a new run.
+  2. Substitution attack - swap two entries' signatures.
+  3. Privilege escalation - worker writes a merge entry.
+  4. Forge attack - synthetic JWS with fake kid.
   5. Path traversal in artefact_path.
 
 Each test sets up the minimum on-disk lineage state required to exercise
@@ -82,9 +82,12 @@ def _entry(
 
 def _append(log_path: Path, entry: LineageEntry, agent: _Agent) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("a") as f:
-        f.write(json.dumps(asdict(entry), sort_keys=True) + "\n")
+    # Append the canonical JCS bytes the real ``LineageStore.append`` writes.
+    # The gate binds verification to the on-disk bytes (issue #1848), so the
+    # fixture must match the canonical form, not ``json.dumps`` defaults.
     canonical = canonicalise(entry)
+    with log_path.open("ab") as f:
+        f.write(canonical + b"\n")
     jws = sign_detached(canonical, agent.priv, kid=agent.kid)
     digest = hashlib.sha256(entry.artefact_path.encode()).hexdigest()
     sig_dir = log_path.parent / "signatures" / digest[:2] / digest
@@ -99,7 +102,7 @@ def _append(log_path: Path, entry: LineageEntry, agent: _Agent) -> None:
 def test_attack_1_replay_old_entry_with_stale_span_id(tmp_path: Path) -> None:
     """An attacker copies an entry from a previous run and appends it into a
     fresh log. The replayed entry is byte-for-byte identical to the original,
-    so its signature verifies — but the gate must surface the duplicate as a
+    so its signature verifies - but the gate must surface the duplicate as a
     fork (two children of the same parent with the same hash) AND any
     parent_hash referenced in the replay must still resolve.
 
@@ -122,7 +125,7 @@ def test_attack_1_replay_old_entry_with_stale_span_id(tmp_path: Path) -> None:
 def test_attack_1b_duplicate_entry_in_same_log_is_surfaced(tmp_path: Path) -> None:
     """Replaying the same entry into the same log produces two physical lines
     with the same entry_hash. The gate surfaces this as a duplicate-tip
-    condition — silent duplication is NOT allowed (it would let an attacker
+    condition - silent duplication is NOT allowed (it would let an attacker
     smuggle a 'second write' that looks identical).
     """
     log = tmp_path / "lineage" / "log.jsonl"
@@ -133,7 +136,7 @@ def test_attack_1b_duplicate_entry_in_same_log_is_surfaced(tmp_path: Path) -> No
     _append(log, g, a)
     _append(log, g, a)
     result = check(log_path=log, agent_cards_dir=cards)
-    # Gate flags two open tips with the same hash — surfaced, not silenced.
+    # Gate flags two open tips with the same hash - surfaced, not silenced.
     assert result.ok is False
     assert any("tip" in f.lower() or "duplicate" in f.lower() for f in result.failures)
 
@@ -192,7 +195,7 @@ def test_attack_3_worker_writes_merge_entry_rejected(tmp_path: Path) -> None:
     assert any("non-steward" in f or "not in allowlist" in f for f in result.failures)
 
 
-# ── 4. Forge attack — synthetic JWS with fake kid ──────────────────────────
+# ── 4. Forge attack - synthetic JWS with fake kid ──────────────────────────
 
 
 def test_attack_4_forge_synthetic_jws_with_unknown_kid(tmp_path: Path) -> None:
@@ -211,10 +214,12 @@ def test_attack_4_forge_synthetic_jws_with_unknown_kid(tmp_path: Path) -> None:
     forged_dict["agent_card_kid"] = "attacker-kid"
     forged_entry = LineageEntry(**forged_dict)
     log.parent.mkdir(parents=True, exist_ok=True)
-    with log.open("a") as f:
-        f.write(json.dumps(forged_dict, sort_keys=True) + "\n")
-    # Attacker signs with their own key + their own kid.
+    # Write the canonical bytes so the forged entry clears the byte-canonical
+    # check (issue #1848) and reaches the kid/signature path under test.
     canonical = canonicalise(forged_entry)
+    with log.open("ab") as f:
+        f.write(canonical + b"\n")
+    # Attacker signs with their own key + their own kid.
     jws = sign_detached(canonical, attacker_priv, kid="attacker-kid")
     digest = hashlib.sha256(b"x.py").hexdigest()
     sig_dir = log.parent / "signatures" / digest[:2] / digest
@@ -226,7 +231,7 @@ def test_attack_4_forge_synthetic_jws_with_unknown_kid(tmp_path: Path) -> None:
     # Even though attacker_pub would technically verify, no card lists it.
     fake_card = AgentCard(agent_id="agent:legit", kid="attacker-kid", public_key_pem=attacker_pub)
     assert verify_detached(canonical, jws, fake_card) is True
-    # The gate must NOT consult attacker-provided keys — only those under
+    # The gate must NOT consult attacker-provided keys - only those under
     # cards_dir. Therefore the gate fails.
     result = check(log_path=log, agent_cards_dir=cards)
     assert result.ok is False
@@ -240,7 +245,7 @@ def test_attack_5_path_traversal_does_not_escape_lineage_dir(tmp_path: Path) -> 
     not cause the gate to look up signatures outside ``log_path.parent``.
 
     The recorder is the layer that should refuse the path; the gate's
-    contract here is "no escape" — signature lookup is always
+    contract here is "no escape" - signature lookup is always
     sharded by sha256(artefact_path) under log_dir/signatures/."""
     log = tmp_path / "lineage" / "log.jsonl"
     cards = tmp_path / "agents"
@@ -253,7 +258,7 @@ def test_attack_5_path_traversal_does_not_escape_lineage_dir(tmp_path: Path) -> 
     for sig in sig_root.rglob("*.jws"):
         # `parents` is a parent-walk; require log.parent on the chain.
         assert log.parent in sig.parents
-    # Gate runs — must not raise.
+    # Gate runs - must not raise.
     result = check(log_path=log, agent_cards_dir=cards)
     assert isinstance(result.ok, bool)
 

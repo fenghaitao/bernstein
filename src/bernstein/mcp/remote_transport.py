@@ -166,7 +166,7 @@ def _jsonrpc_result(
 _TOOL_DEFS: list[dict[str, Any]] = [
     {
         "name": "bernstein_health",
-        "description": "Liveness check — always succeeds if the MCP server is running.",
+        "description": "Liveness check - always succeeds if the MCP server is running.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
@@ -396,7 +396,7 @@ class StreamableHTTPTransport:
 
         result = await self._handle_jsonrpc(session, message)
         if result is None:
-            # Notification — no response.
+            # Notification - no response.
             return (204, resp_headers, b"")
         return (200, resp_headers, json.dumps(result).encode())
 
@@ -466,7 +466,7 @@ class StreamableHTTPTransport:
         req_id = message.get("id")
         params = message.get("params", {})
 
-        # Notifications have no id — fire and forget.
+        # Notifications have no id - fire and forget.
         is_notification = req_id is None and "id" not in message
 
         handler = self._get_method_handler(method)
@@ -535,7 +535,7 @@ class StreamableHTTPTransport:
         session: MCPSession,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        """Handle 'tools/list' — return available tools."""
+        """Handle 'tools/list' - return available tools."""
         session.tools_listed = True
         return {"tools": _TOOL_DEFS}
 
@@ -696,7 +696,7 @@ class StreamableHTTPTransport:
         session: MCPSession,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        """Handle 'ping' — return empty result."""
+        """Handle 'ping' - return empty result."""
         return {}
 
     async def _method_noop(
@@ -827,31 +827,31 @@ class StreamableHTTPTransport:
 
     @staticmethod
     def _is_well_known(path: str) -> bool:
-        """Return True for the OAuth-2 / protected-resource discovery paths."""
-        from bernstein.mcp.oauth import AS_METADATA_PATH, PR_METADATA_PATH
+        """Return True for the protected-resource discovery path.
 
-        return path in {AS_METADATA_PATH, PR_METADATA_PATH}
+        Bernstein only publishes RFC 9728 protected-resource metadata; the
+        RFC 8414 authorization-server metadata is owned by the IdP itself.
+        """
+        from bernstein.mcp.oauth import PR_METADATA_PATH
+
+        return path == PR_METADATA_PATH
 
     def _handle_well_known(
         self,
         path: str,
         headers: dict[str, str],
     ) -> tuple[int, dict[str, str], bytes]:
-        """Serve OAuth-2 authorization-server / protected-resource metadata.
+        """Serve protected-resource metadata (RFC 9728 / MCP draft).
 
         Returns:
             (200, headers, json-body) when discovery is enabled; 404 otherwise.
         """
         from bernstein.mcp.oauth import (
-            AS_METADATA_PATH,
             PR_METADATA_PATH,
-            authorization_server_metadata,
             protected_resource_metadata,
         )
 
-        if path == AS_METADATA_PATH:
-            meta = authorization_server_metadata()
-        elif path == PR_METADATA_PATH:
+        if path == PR_METADATA_PATH:
             # Build the absolute resource URL from the Host header so the
             # advertised resource matches what the client called.
             host = headers.get("host", f"{self._config.host}:{self._config.port}")
@@ -900,7 +900,7 @@ class StreamableHTTPTransport:
             token = auth_header[7:]
             return _constant_time_eq(token, expected)
 
-        # Unknown auth type — deny.
+        # Unknown auth type - deny.
         return False
 
     # -- Session management --------------------------------------------------

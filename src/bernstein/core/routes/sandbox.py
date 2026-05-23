@@ -15,6 +15,8 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
+from bernstein.core.routes._rate_limit_headers import rate_limit_exception
+
 # Session IDs are server-generated hex UUIDs / short hex tokens. Anything
 # outside this character class must be rejected before being embedded in
 # HTML or JS template strings to prevent XSS (SonarCloud S5131).
@@ -113,7 +115,11 @@ async def create_session(body: CreateSessionRequest, request: Request) -> dict[s
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     except RuntimeError as exc:
-        raise HTTPException(status_code=429, detail=str(exc)) from None
+        # Sandbox concurrency caps reset as soon as another session
+        # terminates; we cannot predict that timing precisely, so the
+        # helper attaches the default ``Retry-After`` so the client has a
+        # standards-compliant back-off signal.
+        raise rate_limit_exception(str(exc)) from None
 
     return {
         "session_id": session.id,
@@ -188,7 +194,7 @@ async def sandbox_landing(request: Request) -> HTMLResponse:
 
 
 # ---------------------------------------------------------------------------
-# HTML templates (inline — no Jinja dependency)
+# HTML templates (inline - no Jinja dependency)
 # ---------------------------------------------------------------------------
 
 _COMMON_HEAD = """\
@@ -204,7 +210,7 @@ def _render_landing_page() -> str:
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <title>Bernstein — Try It Free</title>
+  <title>Bernstein - Try It Free</title>
   {_COMMON_HEAD}
 </head>
 <body class="bg-gray-950 text-gray-100 min-h-screen">
@@ -295,7 +301,7 @@ def _render_landing_page() -> str:
           const data = await resp.json();
           window.location.href = data.dashboard_url;
         }} catch (e) {{
-          this.error = 'Network error — please try again';
+          this.error = 'Network error - please try again';
         }} finally {{
           this.loading = false;
         }}
@@ -320,7 +326,7 @@ def _render_sandbox_page(session_id: str) -> str:
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <title>Bernstein Sandbox — Session {safe_title_id}</title>
+  <title>Bernstein Sandbox - Session {safe_title_id}</title>
   {_COMMON_HEAD}
 </head>
 <body class="bg-gray-950 text-gray-100 min-h-screen">

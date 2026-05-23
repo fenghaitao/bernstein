@@ -1,4 +1,4 @@
-"""Agent inspection routes — logs, kill signals, and SSE output streams."""
+"""Agent inspection routes - logs, kill signals, and SSE output streams."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ router = APIRouter()
 _MAX_IDLE_TICKS = 30
 _POLL_INTERVAL = 1.0
 
-# Session-id sanitiser — only allow chars that can legitimately appear in an
+# Session-id sanitiser - only allow chars that can legitimately appear in an
 # agent session id (role, dashes, hex). Blocks path traversal payloads such as
 # ``../../etc/passwd`` and absolute paths like ``/etc/shadow``.
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,128}$")
@@ -69,7 +69,7 @@ def _is_synthetic(session_id: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# GET /agents — list of all known agent sessions (web GUI list view)
+# GET /agents - list of all known agent sessions (web GUI list view)
 # ---------------------------------------------------------------------------
 
 
@@ -88,6 +88,7 @@ def _cost_for_role(store: Any, role: str) -> float:
             value = costs.get(role)
             if isinstance(value, (int, float)):
                 return float(value)
+    # bot-ack: pre-existing-1723 (best-effort cost lookup; never raise on GUI)
     except Exception:
         return 0.0
     return 0.0
@@ -103,6 +104,7 @@ def _serialize_agent(store: Any, sid: str, s: Any, now: float) -> dict[str, Any]
             t = store.get_task(task_ids[0])
             if t is not None:
                 current_task_title = getattr(t, "title", None)
+        # bot-ack: pre-existing-1723 (task lookup is best-effort enrichment)
         except Exception:
             current_task_title = None
     role = getattr(s, "role", "")
@@ -149,6 +151,7 @@ def _synthesize_agents_from_tasks(store: Any, now: float) -> list[dict[str, Any]
     for status_value in ("claimed", "in_progress"):
         try:
             tasks = store.list_tasks(status=status_value)
+        # bot-ack: pre-existing-1723 (best-effort task synthesis for GUI fallback)
         except Exception:
             tasks = []
         for t in tasks:
@@ -219,7 +222,7 @@ def list_agents(request: Request) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# GET /agents/comparison — pairwise compare two sessions for the GUI overlay
+# GET /agents/comparison - pairwise compare two sessions for the GUI overlay
 # ---------------------------------------------------------------------------
 
 
@@ -277,7 +280,7 @@ def agent_logs(
     """
     _validate_session_id(session_id)
     if _is_synthetic(session_id):
-        # Synthetic agents have no on-disk log — return an empty payload
+        # Synthetic agents have no on-disk log - return an empty payload
         # rather than 404 so the GUI can render a friendly placeholder.
         return AgentLogsResponse(session_id=session_id, content="", size=0)
     runtime_dir = _runtime_dir(request)
@@ -315,7 +318,7 @@ def agent_kill(request: Request, session_id: str) -> AgentKillResponse:
     """
     _validate_session_id(session_id)
     if _is_synthetic(session_id):
-        # Synthetic sessions don't correspond to a real spawned process —
+        # Synthetic sessions don't correspond to a real spawned process -
         # acknowledge the request so the UI doesn't show a hard failure,
         # but mark it as a no-op.
         return AgentKillResponse(session_id=session_id, kill_requested=False)

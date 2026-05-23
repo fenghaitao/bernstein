@@ -137,8 +137,7 @@ def has_path_traversal(filepath: str) -> bool:
     normalized = filepath.replace("\\", "/")
 
     # Direct .. traversal (including encoded variants)
-    segments = normalized.split("/")
-    if ".." in segments:
+    if ".." in normalized.split("/"):
         return True
 
     # URL-encoded traversal (%2e%2e or %2f)
@@ -269,7 +268,7 @@ def is_path_allowed(
     """
     # Path traversal quick-check
     if has_path_traversal(filepath):
-        logger.warning("Path traversal detected in %r — denied", filepath)
+        logger.warning("Path traversal detected in %r - denied", filepath)
         return False
 
     # Resolve and validate containment when a project root is available
@@ -339,7 +338,7 @@ def check_file_permissions(
         return [
             PermissionDecision(
                 type=DecisionType.ALLOW,
-                reason=f"No file permission rules defined for role '{role}' — skipping",
+                reason=f"No file permission rules defined for role '{role}' - skipping",
             )
         ]
 
@@ -368,7 +367,7 @@ def check_file_permissions(
 
 
 # ---------------------------------------------------------------------------
-# Diff parsing (shared with guardrails.py — minimal duplication)
+# Diff parsing (shared with guardrails.py - minimal duplication)
 # ---------------------------------------------------------------------------
 
 

@@ -37,14 +37,16 @@ class OpenCodeAdapter(CLIAdapter):
         task_scope: str = "medium",
         budget_multiplier: float = 1.0,
         system_addendum: str = "",
+        multimodal_context: Any | None = None,
     ) -> SpawnResult:
+        self.refuse_multimodal_if_needed(multimodal_context)
         self.enforce_network_policy()
         log_path = workdir / ".sdd" / "runtime" / f"{session_id}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
         if not _has_opencode_auth():
             logger.warning(
-                "OpenCodeAdapter: no OpenCode/provider auth detected — spawn may fail until "
+                "OpenCodeAdapter: no OpenCode/provider auth detected - spawn may fail until "
                 "`opencode auth login` or provider env vars are configured"
             )
         if mcp_config:

@@ -16,7 +16,7 @@ from bernstein.adapters.env_isolation import build_filtered_env
 # Map Bernstein short model names to Amp model identifiers.
 # Amp accepts provider-prefixed names (e.g. "anthropic:claude-sonnet-4-6", "openai:gpt-5.5").
 # Short names are mapped to the most common Amp-compatible IDs; unknown names pass through.
-# Last verified against upstream Amp on 2026-05-05 — install: `brew install amp`.
+# Last verified against upstream Amp on 2026-05-05 - install: `brew install amp`.
 _MODEL_MAP: dict[str, str] = {
     "opus": "anthropic:claude-opus-4-7",
     "opus-4-6": "anthropic:claude-opus-4-6",  # pinned fallback
@@ -50,7 +50,9 @@ class AmpAdapter(CLIAdapter):
         task_scope: str = "medium",
         budget_multiplier: float = 1.0,
         system_addendum: str = "",
+        multimodal_context: Any | None = None,
     ) -> SpawnResult:
+        self.refuse_multimodal_if_needed(multimodal_context)
         self.enforce_network_policy()
         log_path = workdir / ".sdd" / "runtime" / f"{session_id}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)

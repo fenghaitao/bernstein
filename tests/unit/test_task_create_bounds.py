@@ -12,7 +12,7 @@ Covers:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 import pytest
 from fastapi import FastAPI
@@ -26,6 +26,25 @@ from bernstein.core.server.server_app import (
     create_app,
 )
 from bernstein.core.server.server_models import TaskCreate
+
+
+class TaskPostPayload(TypedDict, total=False):
+    title: str
+    description: str
+    role: str
+    complexity: str
+    task_type: str
+
+
+class TaskBatchItemPayload(TypedDict, total=False):
+    title: str
+    description: str
+    scope: str
+
+
+class TaskBatchPayload(TypedDict):
+    tasks: list[TaskBatchItemPayload]
+
 
 # ---------------------------------------------------------------------------
 # TaskCreate pydantic caps
@@ -51,7 +70,7 @@ def test_task_create_title_at_limit_accepted() -> None:
 def test_task_create_accepts_long_descriptive_title() -> None:
     """Real audit-169-style title (~210 chars) must round-trip cleanly."""
     long_title = (
-        "audit-169-knowledge-test-only-modules — 10 test-only knowledge "
+        "audit-169-knowledge-test-only-modules - 10 test-only knowledge "
         "modules: doc_generator, file_relevance, graduated_memory_guard, "
         "memory_extractor/sanitizer, repo_index, semantic_diff, synthesis, "
         "web_graph"
@@ -204,7 +223,7 @@ def _standalone_app_with_cap(max_bytes: int = _DEFAULT_MAX_BODY_BYTES) -> TestCl
 def test_content_length_reject_100mb_header_with_413() -> None:
     """A 100MB body (declared via Content-Length) is rejected with 413."""
     client = _standalone_app_with_cap()
-    # Build a small actual body but lie about size — middleware must trust the
+    # Build a small actual body but lie about size - middleware must trust the
     # header and reject without buffering 100MB.
     large_length = 100 * 1024 * 1024
     resp = client.post(
@@ -333,9 +352,14 @@ def test_post_tasks_200kb_description_returns_422(_app_with_auth_disabled) -> No
 
     async def _run() -> int:
         async with AsyncClient(transport=transport, base_url="http://test") as client:
+            payload: TaskPostPayload = {
+                "title": "big",
+                "description": "z" * 200_000,
+                "role": "backend",
+            }
             resp = await client.post(
                 "/tasks",
-                json={"title": "big", "description": "z" * 200_000, "role": "backend"},
+                json=payload,
             )
             return resp.status_code
 
@@ -371,9 +395,14 @@ def test_post_tasks_small_payload_still_works(_app_with_auth_disabled) -> None:
 
     async def _run() -> tuple[int, dict[str, Any]]:
         async with AsyncClient(transport=transport, base_url="http://test") as client:
+            payload: TaskPostPayload = {
+                "title": "ok",
+                "description": "normal task",
+                "role": "backend",
+            }
             resp = await client.post(
                 "/tasks",
-                json={"title": "ok", "description": "normal task", "role": "backend"},
+                json=payload,
             )
             return resp.status_code, resp.json()
 
@@ -393,9 +422,35 @@ def test_post_tasks_empty_complexity_returns_422_not_500(_app_with_auth_disabled
 
     async def _run() -> int:
         async with AsyncClient(transport=transport, base_url="http://test") as client:
+            payload: TaskPostPayload = {
+                "title": "x",
+                "description": "x",
+                "complexity": "",
+            }
             resp = await client.post(
                 "/tasks",
-                json={"title": "x", "description": "x", "complexity": ""},
+                json=payload,
+            )
+            return resp.status_code
+
+    assert asyncio.run(_run()) == 422
+
+
+def test_post_tasks_empty_task_type_returns_422_not_500(_app_with_auth_disabled) -> None:
+    """POST /tasks with task_type="" must 422, never 500 (regression)."""
+    transport = ASGITransport(app=_app_with_auth_disabled)
+    import asyncio
+
+    async def _run() -> int:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            payload: TaskPostPayload = {
+                "title": "x",
+                "description": "x",
+                "task_type": "",
+            }
+            resp = await client.post(
+                "/tasks",
+                json=payload,
             )
             return resp.status_code
 
@@ -409,9 +464,12 @@ def test_post_tasks_batch_invalid_scope_returns_422_not_500(_app_with_auth_disab
 
     async def _run() -> int:
         async with AsyncClient(transport=transport, base_url="http://test") as client:
+            payload: TaskBatchPayload = {
+                "tasks": [{"title": "x", "description": "x", "scope": "nope"}],
+            }
             resp = await client.post(
                 "/tasks/batch",
-                json={"tasks": [{"title": "x", "description": "x", "scope": "nope"}]},
+                json=payload,
             )
             return resp.status_code
 

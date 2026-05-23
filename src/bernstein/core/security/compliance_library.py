@@ -2,17 +2,17 @@
 
 Provides a library of pure-Python compliance checks that inspect the
 filesystem state of a Bernstein project (``project_root``).  Each check
-verifies a concrete control requirement — audit logging directories exist,
+verifies a concrete control requirement - audit logging directories exist,
 auth is configured, encryption settings are present, etc.
 
 Six compliance frameworks are supported:
 
-- **SOC2** — Trust Service Criteria (CC-series controls)
-- **ISO27001** — Annex A information security controls
-- **PCI_DSS** — Payment Card Industry Data Security Standard
-- **NIST_800_53** — NIST Special Publication 800-53 security controls
-- **HIPAA** — Health Insurance Portability and Accountability Act
-- **GDPR** — General Data Protection Regulation
+- **SOC2** - Trust Service Criteria (CC-series controls)
+- **ISO27001** - Annex A information security controls
+- **PCI_DSS** - Payment Card Industry Data Security Standard
+- **NIST_800_53** - NIST Special Publication 800-53 security controls
+- **HIPAA** - Health Insurance Portability and Accountability Act
+- **GDPR** - General Data Protection Regulation
 
 Usage::
 
@@ -131,7 +131,7 @@ class ComplianceReport:
 
 
 # ---------------------------------------------------------------------------
-# Check functions — pure Python, filesystem-based
+# Check functions - pure Python, filesystem-based
 # ---------------------------------------------------------------------------
 
 
@@ -363,8 +363,7 @@ def check_session_management(project_root: Path) -> PolicyResult:
 
 def check_password_policy(project_root: Path) -> PolicyResult:
     """Verify that a minimum password length policy is configured."""
-    config = _load_yaml_config(project_root)
-    min_len = config.get("security", {}).get("password_min_length", 0)
+    min_len = _load_yaml_config(project_root).get("security", {}).get("password_min_length", 0)
     passed = min_len >= 12  # NIST 800-63B recommendation
     evidence = f"Password min length: {min_len}" if min_len > 0 else "No password policy configured"
     remediation = "" if passed else "Set security.password_min_length to at least 12 characters (NIST 800-63B)."

@@ -16,11 +16,11 @@ routing required for issue #1219:
 
 The primitive remains intentionally narrow:
 
-* One PR per :class:`ReviewRouter` instance — multi-PR fan-out is
+* One PR per :class:`ReviewRouter` instance - multi-PR fan-out is
   deferred to a follow-up that owns scheduling and rate-limit budgets.
-* No webhook surface — callers drive :meth:`ReviewRouter.poll_once` on
+* No webhook surface - callers drive :meth:`ReviewRouter.poll_once` on
   a cadence they control.
-* No automatic re-spawn — the router only emits structured tasks via
+* No automatic re-spawn - the router only emits structured tasks via
   an injected ``task_sink`` callable.  Wiring those tasks into the
   autofix dispatcher (audit chain, cost caps, attempt counter) lands
   in a follow-up.
@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import subprocess
 import time
@@ -225,7 +226,7 @@ def parse_review_threads(
       ``CHANGES_REQUESTED``.
 
     Resolved threads and threads from approving / commenting reviews are
-    skipped silently — they would only produce noise for the spawning
+    skipped silently - they would only produce noise for the spawning
     agent.
 
     Args:
@@ -380,7 +381,7 @@ def poll_loop(
         router: Configured :class:`ReviewRouter` instance.
         poll_seconds: Seconds to sleep between polls.  Must be > 0.
         iterations: When set, run that many polls then return.  ``None``
-            means "loop forever" — the production behaviour.
+            means "loop forever" - the production behaviour.
         sleep_fn: Callable matching :func:`time.sleep`; tests inject a
             no-op.
 
@@ -502,7 +503,7 @@ def _default_git_runner(argv: list[str], workdir: Path | None) -> str:
 def make_list_sink(target: list[ReviewTask]) -> TaskSink:
     """Return a :class:`TaskSink` that appends every task to ``target``.
 
-    The helper is the smallest possible queue adapter — useful for the
+    The helper is the smallest possible queue adapter - useful for the
     CLI ``--once`` / ``--poll`` modes where the spawning agent picks up
     tasks from an in-process list rather than a dedicated broker.
     """
@@ -533,7 +534,7 @@ def emit_jsonl(target_path: Path) -> TaskSink:
 
 
 # ---------------------------------------------------------------------------
-# Worktree registry — persist pr_number -> worktree_path mapping
+# Worktree registry - persist pr_number -> worktree_path mapping
 # ---------------------------------------------------------------------------
 
 
@@ -629,7 +630,7 @@ class WorktreeRegistry:
         if not record.worktree_path:
             raise ValueError("WorktreeRecord.worktree_path must be non-empty")
         stamped = record
-        if record.created_at == 0.0:
+        if record.created_at < 0.0 or math.isclose(record.created_at, 0.0, abs_tol=1e-12):
             stamped = WorktreeRecord(
                 pr_number=record.pr_number,
                 worktree_path=record.worktree_path,
@@ -658,7 +659,7 @@ class WorktreeRegistry:
             try:
                 payload = json.loads(line)
             except json.JSONDecodeError:
-                # Corrupt line — skip rather than abort; the registry
+                # Corrupt line - skip rather than abort; the registry
                 # is opportunistic, not authoritative.
                 logger.warning("review_router: skipping malformed registry line in %s", self._path)
                 continue
@@ -711,7 +712,7 @@ def default_registry_path(workdir: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Reply helper — acknowledge a review thread
+# Reply helper - acknowledge a review thread
 # ---------------------------------------------------------------------------
 
 
@@ -731,7 +732,7 @@ def reply_to_review_thread(
     Args:
         task: The :class:`ReviewTask` whose thread we are replying to.
         body: The reply body, treated as Markdown by GitHub.
-        repo: ``owner/name`` slug — required; the registry tracks it.
+        repo: ``owner/name`` slug - required; the registry tracks it.
         gh_runner: Override for the subprocess call.  Tests inject a
             stub that records argv.
 

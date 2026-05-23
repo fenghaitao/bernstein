@@ -10,7 +10,7 @@ shape NVIDIA NIM exposes, points :class:`ClmAdapter` at it via
 * the streaming SSE assembly returns the full response body,
 * no CLM_TOKEN bytes leak into the spawn log.
 
-Phase 2.5 — also exercises the mTLS path against a TLS-terminated
+Phase 2.5 - also exercises the mTLS path against a TLS-terminated
 fake NIM driven via :func:`build_httpx_client_kwargs` plumbing, with a
 matching negative-path test that asserts the gateway rejects a
 worker which has no client cert at the TLS handshake.
@@ -36,7 +36,7 @@ import uvicorn
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.x509.oid import NameOID
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
@@ -192,7 +192,7 @@ def test_adapter_handshake_and_streaming_assembly(
     assert body.get("model") == _FAKE_NIM_MODEL
 
     # Adapter is wired correctly: spawn produces a log, and the only
-    # token reachable inside the spawned env is the scoped one — never
+    # token reachable inside the spawned env is the scoped one - never
     # the master.
     log_path = tmp_path / ".sdd" / "runtime" / "clm-int.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -263,7 +263,7 @@ def test_streaming_lineage_regression_50plus_chunks(
 
 
 # ---------------------------------------------------------------------------
-# Phase 2.5 — mTLS handshake against a TLS-terminated fake NIM
+# Phase 2.5 - mTLS handshake against a TLS-terminated fake NIM
 # ---------------------------------------------------------------------------
 
 
@@ -291,6 +291,22 @@ def _make_mtls_pki(out_dir: Path) -> dict[str, Path]:
         .not_valid_before(now)
         .not_valid_after(now + datetime.timedelta(days=1))
         .add_extension(x509.BasicConstraints(ca=True, path_length=1), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                key_encipherment=False,
+                content_commitment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), critical=False)
+        .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False)
         .sign(ca_key, hashes.SHA256())
     )
     paths = {
@@ -303,8 +319,8 @@ def _make_mtls_pki(out_dir: Path) -> dict[str, Path]:
     paths["ca"].write_bytes(ca.public_bytes(serialization.Encoding.PEM))
 
     for role, cert_path, key_path, eku in (
-        ("server", paths["server_cert"], paths["server_key"], x509.ExtendedKeyUsageOID.SERVER_AUTH),
-        ("client", paths["client_cert"], paths["client_key"], x509.ExtendedKeyUsageOID.CLIENT_AUTH),
+        ("server", paths["server_cert"], paths["server_key"], ExtendedKeyUsageOID.SERVER_AUTH),
+        ("client", paths["client_cert"], paths["client_key"], ExtendedKeyUsageOID.CLIENT_AUTH),
     ):
         leaf_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         cn = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, role)])
@@ -318,8 +334,24 @@ def _make_mtls_pki(out_dir: Path) -> dict[str, Path]:
             .not_valid_before(now)
             .not_valid_after(now + datetime.timedelta(days=1))
             .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(
+                x509.KeyUsage(
+                    digital_signature=True,
+                    key_encipherment=True,
+                    content_commitment=False,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=False,
+                    crl_sign=False,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                critical=True,
+            )
             .add_extension(x509.ExtendedKeyUsage([eku]), critical=False)
             .add_extension(san, critical=False)
+            .add_extension(x509.SubjectKeyIdentifier.from_public_key(leaf_key.public_key()), critical=False)
+            .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False)
             .sign(ca_key, hashes.SHA256())
         )
         cert_path.write_bytes(leaf.public_bytes(serialization.Encoding.PEM))
@@ -396,7 +428,7 @@ def test_mtls_handshake_succeeds_with_client_cert(
 ) -> None:
     """A worker carrying the matching client cert completes the TLS handshake and the chat-completion succeeds.
 
-    Drives the gateway via :func:`build_httpx_client_kwargs` — exactly
+    Drives the gateway via :func:`build_httpx_client_kwargs` - exactly
     the kwargs the launcher (:mod:`bernstein.adapters.clm_tls_launcher`)
     splats into ``httpx.Client`` defaults inside the spawned aider
     subprocess. Asserting the success path here means the launcher's

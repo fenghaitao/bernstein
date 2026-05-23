@@ -1,4 +1,4 @@
-"""CRUD operations and the TaskStore class — core task mutations.
+"""CRUD operations and the TaskStore class - core task mutations.
 
 All task mutations go through this class so the JSONL log stays consistent.
 """
@@ -10,7 +10,6 @@ import contextlib
 import heapq
 import json
 import logging
-import os
 import time
 import uuid
 from collections import deque
@@ -23,7 +22,9 @@ from typing_extensions import TypedDict
 
 from bernstein.core.defaults import TASK as _TASK_DEFAULTS
 from bernstein.core.hook_events import HookEvent
+from bernstein.core.persistence.durable_write import fsynced_write
 from bernstein.core.persistence.runtime_state import rotate_log_file
+from bernstein.core.tasks.errors import TaskDomainError
 from bernstein.core.tasks.lifecycle import IllegalTransitionError, transition_agent, transition_task
 from bernstein.core.tasks.models import (
     AgentSession,
@@ -268,7 +269,7 @@ _EMPTY_COMPLETION_REASON = "completion missing summary"
 _PROGRESS_ROTATE_BYTES: int = 5 * 1024 * 1024
 
 
-class EmptyCompletionError(Exception):
+class EmptyCompletionError(TaskDomainError):
     """Raised when ``complete()`` is called with an empty ``result_summary``.
 
     Before raising, ``complete()`` auto-transitions the task to ``FAILED``
@@ -295,7 +296,7 @@ class TaskStore:
     Concurrency model:
         Mutations are coordinated by an in-process ``asyncio.Lock`` and the
         JSONL append path does NOT take an OS-level file lock (no
-        ``fcntl.flock``). The store is therefore **single-process only** —
+        ``fcntl.flock``). The store is therefore **single-process only** -
         running the server under ``uvicorn --workers N`` (or with
         ``WEB_CONCURRENCY>1``) interleaves appends, produces torn lines
         that ``replay_jsonl`` silently drops, and lets multiple workers
@@ -319,7 +320,11 @@ class TaskStore:
         # Secondary indices for O(1) status/role lookups
         self._by_status: dict[TaskStatus, dict[str, Task]] = {s: {} for s in TaskStatus}
         self._by_role_status: dict[tuple[str, TaskStatus], list[str]] = {}
-        # Min-heaps keyed by (role, status) — entries are (priority, task_id)
+        # parent_task_id -> set of child task ids. Maintained alongside
+        # ``_by_status`` and ``_by_role_status`` inside ``self._lock`` so route
+        # callers can count subtasks without walking the full task list.
+        self._by_parent: dict[str, set[str]] = {}
+        # Min-heaps keyed by (role, status) - entries are (priority, task_id)
         # Uses lazy deletion: stale entries are discarded in claim_next()
         self._priority_queues: dict[tuple[str, TaskStatus], list[tuple[int, str]]] = {}
         self._jsonl_path: Path = jsonl_path
@@ -366,6 +371,44 @@ class TaskStore:
             with contextlib.suppress(ValueError):
                 ids.remove(task.id)
 
+    def _parent_index_add(self, task: Task) -> None:
+        """Add *task* to the parent->children index.
+
+        ``_by_parent`` tracks task identity (not status), so this is invoked
+        only when a task first enters ``self._tasks`` (create, batch create,
+        replay). Callers must hold ``self._lock`` for create paths; replay
+        runs single-threaded at startup before the lock is in use.
+        """
+        if task.parent_task_id is None:
+            return
+        children = self._by_parent.setdefault(task.parent_task_id, set())
+        children.add(task.id)
+
+    def _parent_index_remove(self, task: Task) -> None:
+        """Remove *task* from the parent->children index.
+
+        Currently unused (the store soft-archives via status; it never deletes
+        records from ``self._tasks``). Provided for symmetry so that any future
+        hard-delete path can keep the index consistent.
+        """
+        if task.parent_task_id is None:
+            return
+        children = self._by_parent.get(task.parent_task_id)
+        if children is None:
+            return
+        children.discard(task.id)
+        if not children:
+            self._by_parent.pop(task.parent_task_id, None)
+
+    def count_subtasks(self, parent_task_id: str) -> int:
+        """Return the number of direct subtasks for *parent_task_id*.
+
+        O(1) lookup via the ``_by_parent`` index. Replaces the
+        ``sum(1 for t in store.list_tasks() ...)`` pattern in the
+        self-create route, which materialised the whole task list per call.
+        """
+        return len(self._by_parent.get(parent_task_id, ()))
+
     # -- persistence --------------------------------------------------------
 
     def replay_jsonl(self) -> None:
@@ -393,7 +436,7 @@ class TaskStore:
                     record: TaskRecord = json.loads(line)
                 except json.JSONDecodeError:
                     logger.error(
-                        "Corrupted JSONL record at %s:%d — skipping: %s",
+                        "Corrupted JSONL record at %s:%d - skipping: %s",
                         self._jsonl_path,
                         line_num,
                         raw_line[:500],
@@ -414,6 +457,7 @@ class TaskStore:
                     task = Task.from_dict(cast("dict[str, Any]", record))
                     self._tasks[task_id] = task
                     self._index_add(task)
+                    self._parent_index_add(task)
         self.replay_progress()
 
     def recover_stale_claimed_tasks(self) -> int:
@@ -472,10 +516,8 @@ class TaskStore:
         """
         line = json.dumps(record, default=str) + "\n"
         self._jsonl_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._jsonl_path.open("a") as handle:
+        with fsynced_write(self._jsonl_path) as handle:
             handle.write(line)
-            handle.flush()
-            os.fsync(handle.fileno())
 
         try:
             tenant_paths = ensure_tenant_layout(self._sdd_dir, str(record["tenant_id"]))
@@ -503,10 +545,8 @@ class TaskStore:
         self._write_buffer.clear()
 
         def _write() -> None:
-            with self._jsonl_path.open("a") as f:
+            with fsynced_write(self._jsonl_path) as f:
                 f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
 
         await _retry_io(_write)
 
@@ -553,7 +593,7 @@ class TaskStore:
                         records.append(json.loads(line))
                     except json.JSONDecodeError:
                         logger.error(
-                            "Corrupted archive record at %s:%d — skipping: %s",
+                            "Corrupted archive record at %s:%d - skipping: %s",
                             self._archive_path,
                             line_num,
                             raw_line[:500],
@@ -593,10 +633,8 @@ class TaskStore:
         line = json.dumps(record, default=str) + "\n"
 
         def _write() -> None:
-            with self._archive_path.open("a") as f:
+            with fsynced_write(self._archive_path) as f:
                 f.write(line)
-                f.flush()
-                os.fsync(f.fileno())
 
         await _retry_io(_write)
         await self._append_tenant_archive_record(task.tenant_id, line)
@@ -648,10 +686,8 @@ class TaskStore:
         rotate_log_file(path, max_bytes=_PROGRESS_ROTATE_BYTES, max_backups=1)
         line = json.dumps(record, default=str) + "\n"
         try:
-            with path.open("a", encoding="utf-8") as handle:
+            with fsynced_write(path) as handle:
                 handle.write(line)
-                handle.flush()
-                os.fsync(handle.fileno())
         except OSError as exc:
             # Progress is advisory: the in-memory log is already updated and
             # the task itself has its own durable JSONL.  Log and move on so
@@ -695,7 +731,7 @@ class TaskStore:
         for task_id, paths in per_task.items():
             task = self._tasks.get(task_id)
             if task is None:
-                # Owning task has been purged — progress is orphaned, skip.
+                # Owning task has been purged - progress is orphaned, skip.
                 continue
             progress: list[ProgressEntry] = cast("list[ProgressEntry]", task.progress_log)  # type: ignore[reportUnknownMemberType]
             snap_q = self._progress_snapshots.setdefault(task_id, deque(maxlen=10))
@@ -713,7 +749,7 @@ class TaskStore:
                         record = json.loads(stripped)
                     except json.JSONDecodeError:
                         logger.error(
-                            "Corrupted progress record at %s:%d — skipping: %s",
+                            "Corrupted progress record at %s:%d - skipping: %s",
                             path,
                             line_num,
                             stripped[:500],
@@ -802,7 +838,7 @@ class TaskStore:
         graph: dict[str, list[str]] = {t.id: list(t.depends_on) for t in tasks.values()}
         graph[new_task.id] = list(new_task.depends_on)
 
-        # DFS from new_task only — existing tasks were validated on insertion.
+        # DFS from new_task only - existing tasks were validated on insertion.
         visited: set[str] = set()
         path: list[str] = []
 
@@ -947,6 +983,7 @@ class TaskStore:
                     )
             self._tasks[task.id] = task
             self._index_add(task)
+            self._parent_index_add(task)
             await self._append_jsonl(self._task_to_record(task))
 
         # SOC 2 audit: log task creation (not a status transition, so lifecycle doesn't cover it)
@@ -1066,7 +1103,7 @@ class TaskStore:
                     missing = [dep for dep in task.depends_on if dep not in self._tasks]
                     if missing:
                         logger.warning(
-                            "create_batch: skipping %r — depends_on references non-existent task(s): %s",
+                            "create_batch: skipping %r - depends_on references non-existent task(s): %s",
                             task.title,
                             ", ".join(missing),
                         )
@@ -1075,7 +1112,7 @@ class TaskStore:
                     cycle = self._detect_cycle(self._tasks, task)
                     if cycle is not None:
                         logger.warning(
-                            "create_batch: skipping %r — circular dependency: %s",
+                            "create_batch: skipping %r - circular dependency: %s",
                             task.title,
                             " -> ".join(cycle),
                         )
@@ -1084,6 +1121,7 @@ class TaskStore:
 
                 self._tasks[task.id] = task
                 self._index_add(task)
+                self._parent_index_add(task)
                 await self._append_jsonl(self._task_to_record(task))
 
                 if dedup_by_title:
@@ -1167,7 +1205,7 @@ class TaskStore:
                 # TASK-003: file ownership overlap check
                 overlap_msg = self._check_file_ownership_overlap(candidate)
                 if overlap_msg is not None:
-                    logger.info("claim_next: skipping %s — %s", task_id, overlap_msg)
+                    logger.info("claim_next: skipping %s - %s", task_id, overlap_msg)
                     blocked_entries.append((priority, task_id))
                     continue
                 task = candidate
@@ -1204,7 +1242,7 @@ class TaskStore:
 
         Args:
             task_id: Task identifier.
-            expected_version: If set, CAS — reject if task.version != this.
+            expected_version: If set, CAS - reject if task.version != this.
             agent_role: If set, reject if task.role != agent_role.
             claimed_by_session: Parent orchestrator session ID to record as claim owner.
 
@@ -1231,7 +1269,7 @@ class TaskStore:
                 )
             if task.status != TaskStatus.OPEN:
                 # never silently re-return an already-claimed or
-                # terminal task — that enables double-claim. Raise so the
+                # terminal task - that enables double-claim. Raise so the
                 # HTTP layer can map it to 409 Conflict.
                 raise ValueError(
                     f"task {task_id} is not open (status={task.status.value}); "
@@ -1259,6 +1297,7 @@ class TaskStore:
         agent_id: str,
         agent_role: str | None = None,
         claimed_by_session: str | None = None,
+        tenant_id: str | None = None,
     ) -> tuple[list[str], list[str]]:
         """Atomically claim multiple tasks by ID with optional role matching.
 
@@ -1271,16 +1310,29 @@ class TaskStore:
             agent_id: The agent claiming the tasks.
             agent_role: If set, only tasks with matching role can be claimed.
             claimed_by_session: Parent orchestrator session ID to record as claim owner.
+            tenant_id: If set, tasks must belong to this tenant scope.
+                Tasks outside the scope (including tasks that no longer
+                exist or whose tenant has changed) are reported as failed.
+                The check runs inside the lock so the authorization decision
+                is atomic with the claim, eliminating a TOCTOU race against
+                concurrent deletes or tenant rewrites.
 
         Returns:
             A tuple of (claimed_ids, failed_ids).
         """
         claimed: list[str] = []
         failed: list[str] = []
+        normalized_tenant = normalize_tenant_id(tenant_id) if tenant_id is not None else None
         async with self._lock:
             for task_id in task_ids:
                 task = self._tasks.get(task_id)
                 if task is None or task.status != TaskStatus.OPEN or not self._dependencies_satisfied(task):
+                    failed.append(task_id)
+                    continue
+                # Tenant authorization happens inside the lock so it cannot
+                # be invalidated between check and claim by a concurrent
+                # request mutating the task.
+                if normalized_tenant is not None and task.tenant_id != normalized_tenant:
                     failed.append(task_id)
                     continue
                 if agent_role is not None and task.role != agent_role:
@@ -1538,7 +1590,7 @@ class TaskStore:
                         reason=f"upstream {task_id} abandoned: {row.reason.value}",
                     )
                 except IllegalTransitionError:
-                    # Restore index entry — leave downstream untouched.
+                    # Restore index entry - leave downstream untouched.
                     self._index_add(downstream)
                     continue
                 downstream.result_summary = f"upstream {task_id} abandoned"
@@ -1786,7 +1838,7 @@ class TaskStore:
                     reason=f"subtask wait timeout after {threshold:.0f}s",
                 )
                 task.result_summary = (
-                    f"ESCALATION: subtask wait exceeded {threshold:.0f}s — "
+                    f"ESCALATION: subtask wait exceeded {threshold:.0f}s - "
                     "requires manager review or human intervention"
                 )
                 task.version += 1
@@ -1896,7 +1948,7 @@ class TaskStore:
         priority: int | None,
         model: str | None = None,
     ) -> Task:
-        """Update mutable task fields (role, priority, model) — manager corrections.
+        """Update mutable task fields (role, priority, model) - manager corrections.
 
         Only open or failed tasks can be reassigned; claimed/in-progress tasks
         are left to finish before the new assignment takes effect.
@@ -1923,7 +1975,7 @@ class TaskStore:
                 # Role and priority are both inputs to the priority heap / role
                 # index; any change requires re-indexing so the heap entry
                 # reflects the new key.  A stale (old_priority, id) entry may
-                # remain in the old heap — claim_next lazy-deletes it on pop
+                # remain in the old heap - claim_next lazy-deletes it on pop
                 # by comparing against the live task.priority.
                 self._index_remove(task)
                 if role_changed:
@@ -1970,7 +2022,7 @@ class TaskStore:
 
         If the task is already open its priority is set to 0 and it stays open.
         If it is in a terminal state (done, failed, cancelled) it is returned
-        unchanged — only open/claimed/in_progress tasks can be force-claimed.
+        unchanged - only open/claimed/in_progress tasks can be force-claimed.
 
         Args:
             task_id: Task identifier.
@@ -1992,7 +2044,7 @@ class TaskStore:
                     f"Task '{task_id}' is in terminal state '{task.status.value}' and cannot be force-claimed"
                 )
             # Set priority *before* re-indexing so the heap entry carries the
-            # final priority — otherwise the pushed (old_priority, id) tuple
+            # final priority - otherwise the pushed (old_priority, id) tuple
             # diverges from task.priority and claim_next will skip it as
             # lazy-deleted (or, worse, pop it at the wrong priority).
             if task.status != TaskStatus.OPEN:
@@ -2002,7 +2054,7 @@ class TaskStore:
                 task.priority = 0
                 self._index_add(task)
             elif task.priority != 0:
-                # Already OPEN — re-index to refresh heap with priority=0.
+                # Already OPEN - re-index to refresh heap with priority=0.
                 self._index_remove(task)
                 task.priority = 0
                 self._index_add(task)
@@ -2021,6 +2073,8 @@ class TaskStore:
         tenant_id: str | None = None,
         claimed_by_session: str | None = None,
         parent_session_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
     ) -> list[Task]:
         """Return all tasks, optionally filtered by status, cell_id, and/or claim owner.
 
@@ -2035,36 +2089,57 @@ class TaskStore:
                 parent session are returned.
             parent_session_id: If provided, only tasks whose ``parent_session_id``
                 matches (tasks scoped to this coordinator session) are returned.
+            limit: If provided, return at most this many tasks after filtering.
+                Pushed into the store so routes (#1727 pagination, export, costs)
+                no longer slice in Python.
+            offset: If provided, skip this many tasks after filtering. Combine
+                with ``limit`` for paginated iteration.
 
         Returns:
             List of matching tasks.
         """
+        # Choose the smallest seed collection: when status is supplied, the
+        # by-status index is already partitioned, otherwise walk all tasks.
         if status is not None:
             try:
                 ts = TaskStatus(status)
-                tasks: list[Task] = list(self._by_status[ts].values())
+                seed: list[Task] = list(self._by_status[ts].values())
             except ValueError:
-                tasks = []
+                return []
         else:
-            tasks = list(self._tasks.values())
-        if cell_id is not None:
-            tasks = [t for t in tasks if t.cell_id == cell_id]
-        if tenant_id is not None:
-            normalized_tenant = normalize_tenant_id(tenant_id)
-            tasks = [t for t in tasks if t.tenant_id == normalized_tenant]
-        if claimed_by_session is not None:
-            tasks = [t for t in tasks if t.claimed_by_session == claimed_by_session]
-        if parent_session_id is not None:
-            tasks = [t for t in tasks if t.parent_session_id == parent_session_id]
-        if status == "open":
-            tasks = [t for t in tasks if self._dependencies_satisfied(t)]
-        return tasks
+            seed = list(self._tasks.values())
+
+        # Resolve filter constants once; previously each pass recomputed them
+        # (or normalized strings) on every iteration.
+        normalized_tenant = normalize_tenant_id(tenant_id) if tenant_id is not None else None
+        check_open_deps = status == "open"
+
+        # Single-pass filter: evaluate every predicate together so we walk
+        # the task list once instead of rebuilding it N times.
+        filtered = [
+            t
+            for t in seed
+            if (cell_id is None or t.cell_id == cell_id)
+            and (normalized_tenant is None or t.tenant_id == normalized_tenant)
+            and (claimed_by_session is None or t.claimed_by_session == claimed_by_session)
+            and (parent_session_id is None or t.parent_session_id == parent_session_id)
+            and (not check_open_deps or self._dependencies_satisfied(t))
+        ]
+
+        if offset is None and limit is None:
+            return filtered
+
+        start = max(0, offset) if offset is not None else 0
+        if limit is None:
+            return filtered[start:]
+        end = start + max(0, limit)
+        return filtered[start:end]
 
     def count_by_status(self, tenant_id: str | None = None) -> dict[str, int]:
         """Return task counts per status without materialising task lists.
 
         This is O(N) in the worst case when tenant filtering is applied, but
-        avoids serialising full task bodies — ideal for the /tasks/counts
+        avoids serialising full task bodies - ideal for the /tasks/counts
         endpoint that the orchestrator polls every tick.
 
         Args:
@@ -2111,7 +2186,7 @@ class TaskStore:
             return None
 
         if task.priority != new_priority:
-            # Refresh heap entry — the old (priority, id) tuple is lazy-deleted
+            # Refresh heap entry - the old (priority, id) tuple is lazy-deleted
             # on pop via the priority mismatch check in claim_next.
             self._index_remove(task)
             task.priority = new_priority
@@ -2240,7 +2315,7 @@ class TaskStore:
                 "shadow_stats": bandit_data.get("shadow_stats", {}),
             }
         except json.JSONDecodeError:
-            logger.warning("Corrupted bandit state at %s — skipping", bandit_state_path)
+            logger.warning("Corrupted bandit state at %s - skipping", bandit_state_path)
         except OSError as exc:
             logger.warning("Cannot read bandit state at %s: %s", bandit_state_path, exc)
 
@@ -2295,7 +2370,7 @@ class TaskStore:
                 record_data: dict[str, Any] = json.loads(line)
             except json.JSONDecodeError:
                 logger.error(
-                    "Corrupted metrics record in %s — skipping: %s",
+                    "Corrupted metrics record in %s - skipping: %s",
                     self._metrics_jsonl_path,
                     raw_line[:500],
                 )

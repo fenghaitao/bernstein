@@ -1,4 +1,4 @@
-"""CLI command: `bernstein analyze` — orchestration-readiness scan.
+"""CLI command: `bernstein analyze` - orchestration-readiness scan.
 
 Closes [#768](https://github.com/sipyourdrink-ltd/bernstein/issues/768).
 
@@ -104,7 +104,7 @@ def _to_json(a: RepoAnalysis) -> dict:
 def _render_rich(a: RepoAnalysis) -> None:
     """Pretty-print the analysis to the console."""
     console.print()
-    console.print(f"[bold]Repo Analysis[/bold] — [cyan]{a.root}[/cyan]")
+    console.print(f"[bold]Repo Analysis[/bold] - [cyan]{a.root}[/cyan]")
     console.print()
 
     # Codebase block
@@ -125,7 +125,12 @@ def _render_rich(a: RepoAnalysis) -> None:
     console.print()
 
     # Score block
-    score_color = "green" if a.readiness_score >= 7 else ("yellow" if a.readiness_score >= 4 else "red")
+    if a.readiness_score >= 7:
+        score_color = "green"
+    elif a.readiness_score >= 4:
+        score_color = "yellow"
+    else:
+        score_color = "red"
     console.print(f"  [bold]Orchestration readiness[/bold]: [{score_color}]{a.readiness_score:.1f}/10[/{score_color}]")
     console.print()
 
@@ -149,6 +154,6 @@ def _render_rich(a: RepoAnalysis) -> None:
         console.print(f"    [cyan]{a.recommended_first_run}[/cyan]")
         console.print()
 
-    # Cost hint — keep loose; we don't try to predict actual model cost.
+    # Cost hint - keep loose; we don't try to predict actual model cost.
     console.print("  [dim]Estimated cost: ~$2.50 (5 agents x ~500 tokens each)[/dim]")
     console.print()

@@ -15,8 +15,8 @@ Usage::
 
 Environment variables::
 
-    BERNSTEIN_DATABASE_URL   — PostgreSQL DSN (enables postgres backend)
-    BERNSTEIN_REDIS_URL      — Redis URL for distributed locking (optional)
+    BERNSTEIN_DATABASE_URL   - PostgreSQL DSN (enables postgres backend)
+    BERNSTEIN_REDIS_URL      - Redis URL for distributed locking (optional)
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ _ARCHIVE_INSERT_SQL = """
 
 logger = logging.getLogger(__name__)
 
-# ``asyncpg`` is an optional dependency — only required for postgres mode.
+# ``asyncpg`` is an optional dependency - only required for postgres mode.
 try:
     import asyncpg  # type: ignore[import-untyped]
 
@@ -68,7 +68,7 @@ _ASYNCPG_AVAILABLE: bool = _has_asyncpg
 
 
 # ---------------------------------------------------------------------------
-# DDL — created on startup if not present
+# DDL - created on startup if not present
 # ---------------------------------------------------------------------------
 
 _DDL = """
@@ -414,7 +414,7 @@ class PostgresTaskStore(BaseTaskStore):
         selection, dependency check, and status update are guaranteed to
         observe a consistent snapshot.  Dependency filtering is pushed down
         into ``_CLAIM_NEXT_SQL`` via a ``NOT EXISTS`` sub-clause, so a task
-        whose prerequisites are unmet is never claimed in the first place —
+        whose prerequisites are unmet is never claimed in the first place -
         removing the former re-open path that could roll back a legitimate
         concurrent claim from another node.
 
@@ -481,25 +481,47 @@ class PostgresTaskStore(BaseTaskStore):
         task_ids: list[str],
         agent_id: str,
         agent_role: str | None = None,
+        tenant_id: str | None = None,
     ) -> tuple[list[str], list[str]]:
-        """Atomically claim multiple tasks.  Uses a single transaction."""
+        """Atomically claim multiple tasks.  Uses a single transaction.
+
+        When ``tenant_id`` is provided the tenant scope check is folded
+        into the same UPDATE statement so tasks outside the scope are
+        reported as failed rather than silently claimed, even under
+        concurrent tenant rewrites.
+        """
         claimed: list[str] = []
         failed: list[str] = []
         assert self._pool is not None
         async with self._pool.acquire() as conn, conn.transaction():
             for task_id in task_ids:
-                row = await conn.fetchrow(
-                    """
-                        UPDATE tasks
-                        SET    status         = 'claimed',
-                               assigned_agent = $2,
-                               version        = version + 1
-                        WHERE  id = $1 AND status = 'open'
-                        RETURNING id
-                        """,
-                    task_id,
-                    agent_id,
-                )
+                if tenant_id is None:
+                    row = await conn.fetchrow(
+                        """
+                            UPDATE tasks
+                            SET    status         = 'claimed',
+                                   assigned_agent = $2,
+                                   version        = version + 1
+                            WHERE  id = $1 AND status = 'open'
+                            RETURNING id
+                            """,
+                        task_id,
+                        agent_id,
+                    )
+                else:
+                    row = await conn.fetchrow(
+                        """
+                            UPDATE tasks
+                            SET    status         = 'claimed',
+                                   assigned_agent = $2,
+                                   version        = version + 1
+                            WHERE  id = $1 AND status = 'open' AND tenant_id = $3
+                            RETURNING id
+                            """,
+                        task_id,
+                        agent_id,
+                        tenant_id,
+                    )
                 if row is not None:
                     claimed.append(task_id)
                 else:
@@ -594,7 +616,7 @@ class PostgresTaskStore(BaseTaskStore):
         return _row_to_task(row)
 
     async def update(self, task_id: str, role: str | None, priority: int | None) -> Task:
-        """Update mutable task fields (role, priority) — manager corrections."""
+        """Update mutable task fields (role, priority) - manager corrections."""
         assert self._pool is not None
         async with self._pool.acquire() as conn:
             current = await conn.fetchrow("SELECT id FROM tasks WHERE id=$1", task_id)

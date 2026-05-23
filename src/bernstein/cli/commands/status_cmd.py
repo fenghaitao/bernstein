@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import time
@@ -23,6 +24,8 @@ from bernstein.cli.status import collect_rate_limit_snapshots, render_status
 from bernstein.cli.ui import make_console
 from bernstein.core.agent_discovery import AgentCapabilities, DiscoveryResult, discover_agents_cached
 from bernstein.tui.worker_badges import format_worker_badge, get_badge_for_worker
+
+logger = logging.getLogger(__name__)
 
 _NOT_AUTHENTICATED_MSG = "not authenticated"
 
@@ -65,7 +68,7 @@ def _load_remote_agents_from_snapshot(runtime_dir: Path) -> list[dict[str, Any]]
                 "command": f"[remote] {runtime_backend}",
                 "model": item.get("model", "?"),
                 "worker_pid": "remote",
-                "child_pid": "—",
+                "child_pid": "-",
                 "runtime": runtime_str,
                 "started_at": started_at,
                 "runtime_backend": runtime_backend,
@@ -184,6 +187,11 @@ def status(as_json: bool, no_color: bool, view_mode: str | None) -> None:
     if snapshots:
         data["rate_limit_meters"] = snapshots
 
+    # Attach the supervisor summary (stuck-count + oldest-stall age).
+    # Operators reading ``bernstein status`` should not have to remember
+    # the dedicated supervisor command to spot a wedged worker.
+    data["supervisor"] = _supervisor_status_summary(Path.cwd())
+
     if as_json or is_json():
         print_json(data)
         return
@@ -200,9 +208,51 @@ def status(as_json: bool, no_color: bool, view_mode: str | None) -> None:
 
     render_status(data, console=con, view_config=vc)
 
+    supervisor_line = _supervisor_summary_line(Path.cwd())
+    if supervisor_line:
+        con.print(f"[dim]{supervisor_line}[/dim]")
+
+
+def _supervisor_status_summary(workdir: Path) -> dict[str, Any]:
+    """Return the supervisor stuck-count summary for ``bernstein status --json``.
+
+    Returns an empty dict if the aggregator raises - the command must
+    never fail on a missing or malformed runtime tree. Failures are
+    logged so an operator can correlate an empty summary with a real
+    cause instead of treating silence as healthy.
+    """
+    try:
+        from bernstein.core.defaults import AGENT
+        from bernstein.core.orchestration.supervisor_aggregator import (
+            aggregator_snapshot,
+            snapshot_to_dict,
+        )
+
+        snapshot = aggregator_snapshot(workdir, heartbeat_stale_s=AGENT.heartbeat_stale_s)
+    except Exception:  # pragma: no cover - status must never error on this
+        logger.exception("supervisor status summary failed")
+        return {}
+    return snapshot_to_dict(snapshot)
+
+
+def _supervisor_summary_line(workdir: Path) -> str:
+    """Return the one-line supervisor summary string for the human view."""
+    try:
+        from bernstein.core.defaults import AGENT
+        from bernstein.core.orchestration.supervisor_aggregator import (
+            aggregator_snapshot,
+            format_summary_line,
+        )
+
+        snapshot = aggregator_snapshot(workdir, heartbeat_stale_s=AGENT.heartbeat_stale_s)
+    except Exception:  # pragma: no cover - status must never error on this
+        logger.exception("supervisor summary line render failed")
+        return ""
+    return format_summary_line(snapshot)
+
 
 # ---------------------------------------------------------------------------
-# ps — process visibility
+# ps - process visibility
 # ---------------------------------------------------------------------------
 
 
@@ -305,7 +355,7 @@ def ps_cmd(as_json: bool, pid_dir: str) -> None:
             str(a.get("worker_badge", "")),
             ", ".join(cast("list[str]", a.get("skill_badges", []))),
             str(a["worker_pid"]),
-            str(a["child_pid"] or "—"),
+            str(a["child_pid"] or "-"),
             a["runtime"],
         )
 
@@ -325,7 +375,7 @@ def _print_parked(parked: list[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# doctor — self-diagnostic helpers
+# doctor - self-diagnostic helpers
 # ---------------------------------------------------------------------------
 
 _CheckFn = Any  # Callable[[str, bool, str, str, str], None]
@@ -373,7 +423,7 @@ def _doctor_check_postgres(_check: _CheckFn) -> None:
         import asyncio
 
         asyncio.run(_check_pg())
-        _check(_STORAGE_BACKEND_LABEL, True, f"postgres — connected ({db_url[:40]}...)", "")
+        _check(_STORAGE_BACKEND_LABEL, True, f"postgres - connected ({db_url[:40]}...)", "")
     except ImportError:
         _check(
             _STORAGE_BACKEND_LABEL,
@@ -385,7 +435,7 @@ def _doctor_check_postgres(_check: _CheckFn) -> None:
         _check(
             _STORAGE_BACKEND_LABEL,
             False,
-            f"postgres — connection failed: {exc}",
+            f"postgres - connection failed: {exc}",
             "Check BERNSTEIN_DATABASE_URL and ensure PostgreSQL is running",
         )
 
@@ -529,7 +579,7 @@ def _doctor_auto_fix(
 
 
 # ---------------------------------------------------------------------------
-# doctor — self-diagnostic
+# doctor - self-diagnostic
 # ---------------------------------------------------------------------------
 
 
@@ -566,7 +616,7 @@ def _doctor_check_adapters(checks: list[dict[str, Any]]) -> bool:
             f"Adapter: {adapter_name}",
             found,
             "found in PATH" if found else "not in PATH",
-            f"Install {adapter_name} CLI — see docs" if not found else "",
+            f"Install {adapter_name} CLI - see docs" if not found else "",
         )
     return any_adapter
 
@@ -771,6 +821,49 @@ def _doctor_check_commit_attribution(checks: list[dict[str, Any]], workdir: Path
         _add_check(checks, _COMMIT_ATTRIBUTION_LABEL, True, f"{commit_result.total_commits} commits: {role_parts}")
 
 
+def _doctor_check_schedule_supervisor(checks: list[dict[str, Any]], workdir: Path) -> None:
+    """Surface schedule supervisor liveness, last fire, and next fire.
+
+    Issue #1798. The doctor entry is informational: a missing supervisor
+    is reported, but we do not fail the overall doctor exit on the basis
+    of an idle schedule subsystem.
+    """
+    sdd_dir = workdir / ".sdd"
+    if not sdd_dir.exists():
+        return
+    try:
+        from bernstein.core.orchestration.schedule_supervisor import ScheduleSupervisor
+        from bernstein.core.planning.schedule_store import ScheduleStore
+
+        store = ScheduleStore(sdd_dir)
+        supervisor = ScheduleSupervisor(store, lambda _e: None, None)
+        status = supervisor.status()
+    except Exception as exc:
+        _add_check(
+            checks,
+            "Schedule supervisor",
+            False,
+            f"unavailable: {exc}",
+            "Check src/bernstein/core/orchestration/schedule_supervisor.py imports",
+        )
+        return
+
+    if status.schedules_total == 0:
+        _add_check(checks, "Schedule supervisor", True, "no schedules registered")
+        return
+
+    import time as _time
+
+    parts = [f"{status.schedules_total} schedule(s)"]
+    if status.last_fire_at:
+        parts.append("last fire " + _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime(status.last_fire_at)))
+    else:
+        parts.append("last fire (none)")
+    if status.next_fire_at:
+        parts.append("next fire " + _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime(status.next_fire_at)))
+    _add_check(checks, "Schedule supervisor", True, "; ".join(parts))
+
+
 def _doctor_check_compliance(checks: list[dict[str, Any]], workdir: Path) -> None:
     """Check compliance mode prerequisites."""
     from bernstein.core.compliance import load_compliance_config
@@ -914,6 +1007,7 @@ def doctor(as_json: bool, auto_fix: bool) -> None:
     _doctor_check_context_and_plugins(checks, workdir)
     _doctor_check_commit_attribution(checks, workdir)
     _doctor_check_compliance(checks, workdir)
+    _doctor_check_schedule_supervisor(checks, workdir)
 
     if auto_fix:
         _doctor_auto_fix(checks, stale_pid_paths, workdir, fixed, manual_needed)
@@ -955,7 +1049,7 @@ def _detect_runtime_environment() -> str:
 
 
 # ---------------------------------------------------------------------------
-# commit-stats — agent attribution report
+# commit-stats - agent attribution report
 # ---------------------------------------------------------------------------
 
 

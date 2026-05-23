@@ -30,7 +30,7 @@ jobs:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
       - name: Harden runner (audit mode)
-        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
       - name: Check API key
@@ -38,7 +38,7 @@ jobs:
         run: |
           if [ -z "$ANTHROPIC_API_KEY" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::Skipping Bernstein review — no ANTHROPIC_API_KEY secret"
+            echo "::notice::Skipping Bernstein review - no ANTHROPIC_API_KEY secret"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
@@ -47,8 +47,20 @@ jobs:
         if: steps.check.outputs.skip != 'true'
         with:
           persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
+
+      - name: Fetch PR diff
+        if: steps.check.outputs.skip != 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_DIFF_URL: ${{ github.event.pull_request.diff_url }}
+        run: |
+          curl --fail --location --silent --show-error --retry 3 \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3.diff" \
+            "${PR_DIFF_URL}" \
+            -o .bernstein-pr.diff
 
       - name: Review PR
         if: steps.check.outputs.skip != 'true'
@@ -58,7 +70,8 @@ jobs:
           task: >
             Review pull request #${{ github.event.pull_request.number }}
             titled "${{ github.event.pull_request.title }}".
-            Check code quality, run the test suite, verify type correctness, and
+            Use .bernstein-pr.diff as the PR diff data. Check code quality,
+            run the test suite, verify type correctness, and
             identify any security or correctness issues. Summarise your findings
             and post them as a PR comment. Do not push any changes.
           budget: "3.00"

@@ -4,7 +4,7 @@ Implementation of [#768](https://github.com/sipyourdrink-ltd/bernstein/issues/76
 `bernstein analyze` scans a repo and reports a readiness score for
 multi-agent orchestration, plus actionable opportunities.
 
-The module is pure-Python and offline — no network calls, no LLM calls.
+The module is pure-Python and offline - no network calls, no LLM calls.
 This keeps `bernstein analyze` cheap to run in CI and on first-clone
 before the user has configured an LLM provider.
 """
@@ -108,6 +108,26 @@ class LanguageBreakdown:
     pct: float  # of total source files in the repo
 
 
+def _language_breakdowns() -> list[LanguageBreakdown]:
+    """Return a typed empty language-breakdown list."""
+    return []
+
+
+def _paths() -> list[Path]:
+    """Return a typed empty path list."""
+    return []
+
+
+def _file_line_pairs() -> list[tuple[Path, int]]:
+    """Return a typed empty file-line list."""
+    return []
+
+
+def _strings() -> list[str]:
+    """Return a typed empty string list."""
+    return []
+
+
 @dataclass
 class RepoAnalysis:
     """Result of analyzing a repo for orchestration readiness."""
@@ -119,7 +139,7 @@ class RepoAnalysis:
     largest_file_lines: int = 0
     largest_file_path: Path | None = None
 
-    languages: list[LanguageBreakdown] = field(default_factory=list)
+    languages: list[LanguageBreakdown] = field(default_factory=_language_breakdowns)
 
     test_files: int = 0
     source_files_without_tests_estimate: int = 0  # source files that have no matching test
@@ -128,13 +148,13 @@ class RepoAnalysis:
     has_ci: bool = False
     ci_kind: str = ""  # "github", "gitlab", "jenkins", or ""
 
-    modules_without_tests: list[Path] = field(default_factory=list)
-    files_over_300_lines: list[tuple[Path, int]] = field(default_factory=list)
+    modules_without_tests: list[Path] = field(default_factory=_paths)
+    files_over_300_lines: list[tuple[Path, int]] = field(default_factory=_file_line_pairs)
     python_files_without_type_hints: int = 0  # files where no `: ` annotation found
 
     readiness_score: float = 0.0  # 0-10 scale
-    strengths: list[str] = field(default_factory=list)
-    opportunities: list[str] = field(default_factory=list)
+    strengths: list[str] = field(default_factory=_strings)
+    opportunities: list[str] = field(default_factory=_strings)
     recommended_first_run: str = ""
 
 
@@ -157,15 +177,12 @@ def analyze_repo(root: Path) -> RepoAnalysis:
     analysis = RepoAnalysis(root=root)
 
     files_by_language: dict[str, int] = {}
-    other_files = 0
-
     # Single-pass walk.
     for path in _walk_files(root):
         analysis.total_files += 1
         ext = path.suffix.lower()
         lang = _LANGUAGE_BY_EXT.get(ext)
         if lang is None:
-            other_files += 1
             continue
 
         analysis.total_source_files += 1
@@ -198,9 +215,9 @@ def analyze_repo(root: Path) -> RepoAnalysis:
         ratio = min(analysis.test_files / non_test_source, 1.0)
         analysis.test_coverage_estimate_pct = round(ratio * 100, 1)
 
-    # Modules without tests — group source files by top-level package and
+    # Modules without tests - group source files by top-level package and
     # flag packages with no test files at all.
-    analysis.modules_without_tests = _modules_without_tests(root, analysis)
+    analysis.modules_without_tests = _modules_without_tests(root)
 
     # CI detection.
     analysis.has_ci, analysis.ci_kind = _detect_ci(root)
@@ -262,12 +279,12 @@ def _has_type_hints(path: Path) -> bool:
         text = path.read_text(encoding="utf-8", errors="replace")
     except (OSError, PermissionError):
         return True  # don't penalize unreadable files
-    # Simple substring checks — `: ` after an open-paren or `-> ` before `:`
+    # Simple substring checks - `: ` after an open-paren or `-> ` before `:`
     # is enough to indicate at least one annotation.
     return ") -> " in text or (": " in text and "def " in text)
 
 
-def _modules_without_tests(root: Path, analysis: RepoAnalysis) -> list[Path]:
+def _modules_without_tests(root: Path) -> list[Path]:
     """Return top-level Python packages or src/ subdirs with zero test files."""
     candidates: dict[Path, dict[str, bool]] = {}
     for entry in _walk_files(root):
@@ -314,11 +331,11 @@ def _compute_score_and_narrative(a: RepoAnalysis) -> None:
 
     The score is the average of four equally-weighted components on a 0-10 scale:
 
-      1. **Test coverage** — proxied by ratio of test files to source files.
-      2. **Modularity** — proxied by absence of files over 300 lines + presence
+      1. **Test coverage** - proxied by ratio of test files to source files.
+      2. **Modularity** - proxied by absence of files over 300 lines + presence
          of test files in every top-level module.
-      3. **CI presence** — 10 if a CI config exists, else 0.
-      4. **Typed (Python only)** — 10 if 90%+ of Python files have at least
+      3. **CI presence** - 10 if a CI config exists, else 0.
+      4. **Typed (Python only)** - 10 if 90%+ of Python files have at least
          one annotation, falls linearly to 0 at 0% typed.
 
     Each component contributes a maximum of 2.5 to the final out-of-10 score.
@@ -381,10 +398,11 @@ def _compute_score_and_narrative(a: RepoAnalysis) -> None:
         a.readiness_score = round((c_tests + c_mod + c_ci + c_typed) / 4, 1)
 
     # Narrative.
-    strengths, opps = [], []
+    strengths: list[str] = []
+    opps: list[str] = []
 
     if c_tests >= 6:
-        strengths.append("Good test coverage — agents can verify their work")
+        strengths.append("Good test coverage - agents can verify their work")
     elif c_tests > 0:
         n = len(a.modules_without_tests)
         if n > 0:
@@ -393,12 +411,12 @@ def _compute_score_and_narrative(a: RepoAnalysis) -> None:
         opps.append('No test files detected; consider `bernstein -g "add tests for the public API"` first')
 
     if c_mod >= 8:
-        strengths.append(f"Modular structure — no large monolith files (max: {a.largest_file_lines} lines)")
+        strengths.append(f"Modular structure - no large monolith files (max: {a.largest_file_lines} lines)")
     elif a.files_over_300_lines:
         opps.append(f"{len(a.files_over_300_lines)} files over 300 lines could benefit from decomposition")
 
     if c_ci == 10:
-        strengths.append("CI configured — quality gates will work out of the box")
+        strengths.append("CI configured - quality gates will work out of the box")
     else:
         opps.append("No CI config detected; add .github/workflows/ci.yml before delegating to agents")
 
@@ -408,12 +426,12 @@ def _compute_score_and_narrative(a: RepoAnalysis) -> None:
             'consider `bernstein -g "add type hints"`'
         )
     elif c_typed is not None and c_typed >= 9:
-        strengths.append("Type annotations broadly present — agents can use them as machine-readable specs")
+        strengths.append("Type annotations broadly present - agents can use them as machine-readable specs")
 
     a.strengths = strengths
     a.opportunities = opps
 
-    # Recommended first run — pick the highest-leverage opportunity.
+    # Recommended first run - pick the highest-leverage opportunity.
     if a.python_files_without_type_hints > 5:
         a.recommended_first_run = 'bernstein -g "Add type annotations to all public functions in src/"'
     elif a.modules_without_tests:

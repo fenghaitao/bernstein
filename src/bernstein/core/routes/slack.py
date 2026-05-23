@@ -1,4 +1,4 @@
-"""Slack webhook routes — slash command and Events API endpoints."""
+"""Slack webhook routes - slash command and Events API endpoints."""
 
 from __future__ import annotations
 
@@ -29,12 +29,12 @@ async def slack_slash_command(request: Request) -> JSONResponse:
     Returns 200 on success, 401 on bad/missing signature, 400 on parse error.
 
     Slash command form fields parsed:
-        - ``command``      — the slash command (e.g. ``/bernstein``)
-        - ``text``         — text following the command
-        - ``user_id``      — Slack user ID
-        - ``channel_id``   — Slack channel ID
-        - ``response_url`` — URL for delayed responses (up to 30 min)
-        - ``trigger_id``   — trigger ID for opening modals
+        - ``command``      - the slash command (e.g. ``/bernstein``)
+        - ``text``         - text following the command
+        - ``user_id``      - Slack user ID
+        - ``channel_id``   - Slack channel ID
+        - ``response_url`` - URL for delayed responses (up to 30 min)
+        - ``trigger_id``   - trigger ID for opening modals
     """
     from bernstein.core.trigger_sources.slack import verify_slack_signature
 
@@ -72,6 +72,7 @@ async def slack_slash_command(request: Request) -> JSONResponse:
             "trigger_id": _first("trigger_id"),
             "thread_ts": _first("thread_ts"),
         }
+    # bot-ack: pre-existing-1723 (multipart form parse may raise diverse errors)
     except Exception:
         logger.debug("Bad slash command payload", exc_info=True)
         return JSONResponse(
@@ -114,9 +115,9 @@ async def slack_slash_command(request: Request) -> JSONResponse:
         logger.info("Created task %s from Slack command: %r", task.id, sanitize_log(text[:60]))
         ack_text = f"Task `{task.id}` created: {text[:60]}"
     else:
-        ack_text = f"Received `{payload['command']}` — no task text provided."
+        ack_text = f"Received `{payload['command']}` - no task text provided."
 
-    # Acknowledge immediately — Slack requires response within 3 seconds
+    # Acknowledge immediately - Slack requires response within 3 seconds
     return JSONResponse(
         status_code=200,
         content={
@@ -146,6 +147,7 @@ def _parse_slack_body(body: bytes) -> dict[str, Any] | None:
         import json as _json
 
         return _json.loads(body)  # type: ignore[no-any-return]
+    # bot-ack: pre-existing-1723 (best-effort Slack event parse)
     except Exception:
         return None
 

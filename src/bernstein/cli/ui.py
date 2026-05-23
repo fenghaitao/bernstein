@@ -25,7 +25,7 @@ _STYLE_BOLD_GREEN = "bold green"
 _STYLE_BOLD_YELLOW = "bold yellow"
 
 # ---------------------------------------------------------------------------
-# Status colors — single source of truth
+# Status colors - single source of truth
 # ---------------------------------------------------------------------------
 
 STATUS_COLORS: dict[str, str] = {
@@ -156,7 +156,7 @@ class AgentInfo:
             role=str(data.get("role", "")),
             model=str(data.get("model", "")),
             status=str(data.get("status", "idle")),
-            task_ids=[t for t in cast("list[str]", data.get("task_ids") or [])],
+            task_ids=list(cast("list[str]", data.get("task_ids") or [])),
             runtime_s=float(data.get("runtime_s", 0.0)),
             abort_reason=str(data.get("abort_reason", "")),
             abort_detail=str(data.get("abort_detail", "")),

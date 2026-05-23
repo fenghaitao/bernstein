@@ -9,7 +9,7 @@ Bernstein writes role-specific skills into the worktree's ``.claude/skills/``
 directory before spawning an agent so that:
 
 - Orchestration protocols (completion, signal-check) survive context compaction
-- Prompt size is reduced by 30-40% — boilerplate moves to skills loaded only
+- Prompt size is reduced by 30-40% - boilerplate moves to skills loaded only
   when relevant
 - Skills compose cleanly: a backend agent automatically gets the test-runner
   skill, a commit skill, and orchestration protocol skills
@@ -20,15 +20,33 @@ dependency) so skills can be rendered without external libraries.
 
 from __future__ import annotations
 
+import hashlib
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict, cast
 
+import yaml
+
+from bernstein.core.skills.activation_log import (
+    ActivationRecord,
+    log_activation,
+)
 from bernstein.core.skills.sanitizer import sanitize_skill_body
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from bernstein.core.models import Task
+
+
+class _FrontmatterSchema(TypedDict, total=False):
+    """Subset of Claude-Code skill frontmatter the injector reads.
+
+    The loose-YAML parse may surface extra keys; only the ones the
+    activation log needs are typed here.
+    """
+
+    version: str
+
 
 _logger = logging.getLogger(__name__)
 
@@ -98,7 +116,7 @@ def render_skill_template(
     complete_cmds = (
         "\n\n".join(complete_cmds_parts)
         if complete_cmds_parts
-        else ("```bash\n# No task IDs available — check with the orchestrator\n```")
+        else ("```bash\n# No task IDs available - check with the orchestrator\n```")
     )
 
     task_ids = " ".join(t.id for t in task_list)
@@ -136,7 +154,7 @@ def inject_skills(
     skills_source_dir = templates_dir.parent / "skills"
     if not skills_source_dir.is_dir():
         _logger.debug(
-            "Skills templates directory not found: %s — skipping injection",
+            "Skills templates directory not found: %s - skipping injection",
             skills_source_dir,
         )
         return
@@ -149,7 +167,7 @@ def inject_skills(
     for template_name in templates_to_inject:
         source_path = skills_source_dir / template_name
         if not source_path.exists():
-            _logger.debug("Skill template not found: %s — skipping", source_path)
+            _logger.debug("Skill template not found: %s - skipping", source_path)
             continue
 
         try:
@@ -175,6 +193,79 @@ def inject_skills(
         dest_path = skills_dest_dir / template_name
         try:
             dest_path.write_text(rendered, encoding="utf-8")
-            _logger.debug("Injected skill: %s → %s", template_name, dest_path)
+            _logger.debug("Injected skill: %s -> %s", template_name, dest_path)
         except OSError as exc:
             _logger.debug("Failed to write skill %s: %s", dest_path, exc)
+            continue
+
+        # Activation log: best-effort, opt-out via env var. We compute a
+        # short BLAKE2b digest over the sanitised (pre-render) body so
+        # the log line refers to the source skill rather than the
+        # rendered-with-task-ids variant. ``version`` is best-effort
+        # pulled from frontmatter; missing values stay as empty strings.
+        try:
+            skill_name = template_name.rsplit(".", 1)[0]
+            version = _extract_skill_version(sanitized)
+            digest = hashlib.blake2b(sanitized.encode("utf-8"), digest_size=16).hexdigest()
+            for task in tasks:
+                log_activation(
+                    ActivationRecord(
+                        skill=skill_name,
+                        role=role,
+                        task_id=task.id,
+                        trigger_source="role-binding",
+                        version=version,
+                        digest=digest,
+                    ),
+                    workdir=workdir,
+                )
+            if not tasks:
+                log_activation(
+                    ActivationRecord(
+                        skill=skill_name,
+                        role=role,
+                        task_id="",
+                        trigger_source="role-binding",
+                        version=version,
+                        digest=digest,
+                    ),
+                    workdir=workdir,
+                )
+        except Exception:
+            # Never let the activation log block a spawn.
+            _logger.debug("activation log append failed for %s", template_name, exc_info=True)
+
+
+def _extract_skill_version(content: str) -> str:
+    """Pull ``version`` from the YAML frontmatter, defaulting to empty.
+
+    The injector handles Claude-Code-shaped skills whose frontmatter may
+    not match :class:`SkillManifest` strictly; we do a loose YAML parse
+    rather than running it through Pydantic so non-strict templates
+    still produce an activation record.
+    """
+    if not content.startswith("---"):
+        return ""
+    lines = content.splitlines()
+    fence_count = 0
+    front_lines: list[str] = []
+    for line in lines:
+        if line.rstrip() == "---":
+            fence_count += 1
+            if fence_count == 2:
+                break
+            continue
+        if fence_count == 1:
+            front_lines.append(line)
+    if fence_count < 2:
+        return ""
+    try:
+        data = yaml.safe_load("\n".join(front_lines))
+    except yaml.YAMLError:
+        return ""
+    if isinstance(data, dict):
+        typed = cast(_FrontmatterSchema, data)
+        version = typed.get("version")
+        if isinstance(version, str):
+            return version
+    return ""

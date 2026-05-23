@@ -37,20 +37,21 @@ class AuggieAdapter(CLIAdapter):
         task_scope: str = "medium",
         budget_multiplier: float = 1.0,
         system_addendum: str = "",
+        multimodal_context: Any | None = None,
     ) -> SpawnResult:
         """Launch an Auggie process with the given prompt.
 
         Args:
             prompt: The task prompt for the agent (passed positionally).
             workdir: Working directory for the Auggie process.
-            model_config: Model and effort configuration (unused — Auggie
+            model_config: Model and effort configuration (unused - Auggie
                 selects the model via its own configuration).
             session_id: Unique session identifier used for log naming.
             mcp_config: Optional MCP server definitions (unused).
             timeout_seconds: Process timeout in seconds.
             task_scope: Task scope label (unused by this adapter).
             budget_multiplier: Retry budget multiplier (unused by this adapter).
-            system_addendum: Protocol-critical instructions (unused — Auggie
+            system_addendum: Protocol-critical instructions (unused - Auggie
                 accepts only a single positional prompt).
 
         Returns:
@@ -60,6 +61,7 @@ class AuggieAdapter(CLIAdapter):
             RuntimeError: The ``auggie`` binary is missing from PATH or
                 cannot be executed due to permissions.
         """
+        self.refuse_multimodal_if_needed(multimodal_context)
         self.enforce_network_policy()
         log_path = workdir / ".sdd" / "runtime" / f"{session_id}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)

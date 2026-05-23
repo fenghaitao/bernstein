@@ -99,13 +99,14 @@ async def tracker_webhook(adapter: str, request: Request) -> JSONResponse:
 
     receiver = _get_receiver(request)
     body = await request.body()
-    headers = {k: v for k, v in request.headers.items()}
+    headers = dict(request.headers.items())
 
     result = receiver.receive(adapter, headers, body)
 
     if result.status == "accepted" and result.event is not None:
         queue = getattr(request.app.state, "tracker_event_queue", None)
         if queue is not None:
+            # bot-ack: pre-existing-1723 (queue boundary; do not raise into HTTP)
             try:
                 queue.put_nowait(result.event)
             except Exception as exc:  # boundary

@@ -1,7 +1,10 @@
-"""Unit tests for chat drivers: Telegram long-poll + Discord/Slack stubs.
+"""Unit tests for the Telegram long-poll chat driver.
 
 The Telegram cases exercise the standard ``python-telegram-bot``
-long-poll driver at :mod:`bernstein.core.chat.drivers.telegram`.
+long-poll driver at :mod:`bernstein.core.chat.drivers.telegram`. The
+Slack driver lives in its own test module under
+``tests/unit/core/chat/test_slack_driver.py`` and the Discord driver
+under ``tests/unit/core/chat/test_discord_driver.py``.
 """
 
 from __future__ import annotations
@@ -15,8 +18,6 @@ from typing import Any
 import pytest
 
 from bernstein.core.chat.bridge import ChatMessage, PendingApproval
-from bernstein.core.chat.drivers.discord import DISCORD_STUB_MESSAGE, DiscordBridge
-from bernstein.core.chat.drivers.slack import SLACK_STUB_MESSAGE, SlackBridge
 
 # ---------------------------------------------------------------------------
 # Fake python-telegram-bot package
@@ -35,13 +36,13 @@ class _FakeBot:
 
     async def send_message(
         self, **kwargs: Any
-    ) -> _FakeSentMessage:  # NOSONAR — async-signature required by protocol / fixture
+    ) -> _FakeSentMessage:  # NOSONAR - async-signature required by protocol / fixture
         self.sent.append(kwargs)
         return _FakeSentMessage(message_id=len(self.sent) + 99)
 
     async def edit_message_text(
         self, **kwargs: Any
-    ) -> None:  # NOSONAR — async-signature required by protocol / fixture
+    ) -> None:  # NOSONAR - async-signature required by protocol / fixture
         self.edited.append(kwargs)
 
 
@@ -50,10 +51,10 @@ class _FakeUpdater:
     started: bool = False
     stopped: bool = False
 
-    async def start_polling(self) -> None:  # NOSONAR — async-signature required by protocol / fixture
+    async def start_polling(self) -> None:  # NOSONAR - async-signature required by protocol / fixture
         self.started = True
 
-    async def stop(self) -> None:  # NOSONAR — async-signature required by protocol / fixture
+    async def stop(self) -> None:  # NOSONAR - async-signature required by protocol / fixture
         self.stopped = True
 
 
@@ -70,16 +71,16 @@ class _FakeApplication:
     def add_handler(self, handler: Any) -> None:
         self.handlers.append(handler)
 
-    async def initialize(self) -> None:  # NOSONAR — async-signature required by protocol / fixture
+    async def initialize(self) -> None:  # NOSONAR - async-signature required by protocol / fixture
         self.initialized = True
 
-    async def start(self) -> None:  # NOSONAR — async-signature required by protocol / fixture
+    async def start(self) -> None:  # NOSONAR - async-signature required by protocol / fixture
         self.started = True
 
-    async def stop(self) -> None:  # NOSONAR — async-signature required by protocol / fixture
+    async def stop(self) -> None:  # NOSONAR - async-signature required by protocol / fixture
         self.started = False
 
-    async def shutdown(self) -> None:  # NOSONAR — async-signature required by protocol / fixture
+    async def shutdown(self) -> None:  # NOSONAR - async-signature required by protocol / fixture
         self.shutdown_called = True
 
 
@@ -140,38 +141,6 @@ def fake_telegram(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Discord / Slack stubs
-# ---------------------------------------------------------------------------
-
-
-def test_discord_start_raises_stub_message() -> None:
-    bridge = DiscordBridge(token="x")
-    with pytest.raises(NotImplementedError) as excinfo:
-        asyncio.run(bridge.start())
-    assert DISCORD_STUB_MESSAGE in str(excinfo.value)
-    assert "op-001b" in str(excinfo.value)
-
-
-def test_slack_start_raises_stub_message() -> None:
-    bridge = SlackBridge(token="x")
-    with pytest.raises(NotImplementedError) as excinfo:
-        asyncio.run(bridge.start())
-    assert SLACK_STUB_MESSAGE in str(excinfo.value)
-    assert "op-001b" in str(excinfo.value)
-
-
-def test_stub_registrations_are_noops() -> None:
-    """Registering handlers on stubs is a silent no-op."""
-    bridge = DiscordBridge()
-    bridge.on_command("run", lambda _m: _async_noop())  # type: ignore[misc,arg-type]
-    bridge.on_button(lambda _t, _a, _d: _async_noop())  # type: ignore[misc,arg-type]
-
-
-async def _async_noop() -> None:  # NOSONAR — async-signature required by protocol / fixture
-    return None
-
-
-# ---------------------------------------------------------------------------
 # Telegram flow
 # ---------------------------------------------------------------------------
 
@@ -189,7 +158,7 @@ def test_telegram_run_command_routes_to_registered_handler(fake_telegram: None) 
 
     received: list[ChatMessage] = []
 
-    async def handler(msg: ChatMessage) -> None:  # NOSONAR — async-signature required by protocol / fixture
+    async def handler(msg: ChatMessage) -> None:  # NOSONAR - async-signature required by protocol / fixture
         received.append(msg)
 
     bridge = TelegramBridge(token="dummy")
@@ -221,7 +190,7 @@ def test_telegram_approval_button_round_trip(fake_telegram: None) -> None:
 
     async def button(
         thread_id: str, approval_id: str, decision: str
-    ) -> None:  # NOSONAR — async-signature required by protocol / fixture
+    ) -> None:  # NOSONAR - async-signature required by protocol / fixture
         decisions.append((thread_id, approval_id, decision))
 
     bridge = TelegramBridge(token="dummy")
@@ -317,7 +286,7 @@ def _fake_callback_update(*, data: str, chat_id: int) -> Any:
     chat = types.SimpleNamespace(id=chat_id)
     message = types.SimpleNamespace(chat=chat)
 
-    async def _answer() -> None:  # NOSONAR — async-signature required by protocol / fixture
+    async def _answer() -> None:  # NOSONAR - async-signature required by protocol / fixture
         return None
 
     query = types.SimpleNamespace(data=data, message=message, answer=_answer)

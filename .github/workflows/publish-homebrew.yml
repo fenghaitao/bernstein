@@ -28,7 +28,7 @@ jobs:
       contents: read
     steps:
       - name: Harden runner (audit mode)
-        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -125,7 +125,7 @@ jobs:
           git config user.email "bernstein-bot@users.noreply.github.com"
           git add Formula/bernstein.rb
           if git diff --cached --quiet; then
-            echo "No changes to publish — formula already at ${META_VERSION}."
+            echo "No changes to publish - formula already at ${META_VERSION}."
             exit 0
           fi
           git commit -m "bernstein ${META_VERSION}"

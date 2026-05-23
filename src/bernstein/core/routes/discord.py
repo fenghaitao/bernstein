@@ -1,4 +1,4 @@
-"""Discord interaction routes — slash command handler for Bernstein.
+"""Discord interaction routes - slash command handler for Bernstein.
 
 Handles Discord Application Command interactions delivered via Discord's
 Interactions Endpoint URL. Discord requires the endpoint to:
@@ -8,13 +8,13 @@ Interactions Endpoint URL. Discord requires the endpoint to:
 3. Respond to slash commands within 3 seconds.
 
 Supported commands (registered via Discord Developer Portal):
-    /bernstein run <task>   — create a new Bernstein task
-    /bernstein status       — show current task summary
-    /bernstein stop         — request graceful shutdown
-    /bernstein cost         — show cumulative spend report
+    /bernstein run <task>   - create a new Bernstein task
+    /bernstein status       - show current task summary
+    /bernstein stop         - request graceful shutdown
+    /bernstein cost         - show cumulative spend report
 
 Configuration:
-    DISCORD_PUBLIC_KEY     — Discord application public key (required for signature verification)
+    DISCORD_PUBLIC_KEY     - Discord application public key (required for signature verification)
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ def _ephemeral(content: str) -> JSONResponse:
             "type": _CHANNEL_MESSAGE_WITH_SOURCE,
             "data": {
                 "content": content,
-                "flags": 64,  # EPHEMERAL — only visible to the invoking user
+                "flags": 64,  # EPHEMERAL - only visible to the invoking user
             },
         },
     )
@@ -113,10 +113,14 @@ async def discord_interactions(request: Request) -> JSONResponse:
     try:
         import json as _json
 
-        payload: dict[str, Any] = _json.loads(body)
-    except Exception:
+        raw_payload = _json.loads(body)
+        if not isinstance(raw_payload, dict):
+            raise ValueError("Discord interaction payload must be a JSON object")
+    except (ValueError, UnicodeDecodeError):
         logger.debug("Bad Discord interaction payload", exc_info=True)
         return JSONResponse(status_code=400, content={"detail": "Bad interaction payload"})
+
+    payload: dict[str, Any] = raw_payload
 
     interaction_type = payload.get("type", 0)
     if interaction_type == _PING or interaction_type != _APPLICATION_COMMAND:
@@ -144,7 +148,7 @@ async def discord_interactions(request: Request) -> JSONResponse:
 
 
 async def _handle_run(request: Request, options: dict[str, Any], payload: dict[str, Any]) -> JSONResponse:
-    """Handle ``/bernstein run <task>`` — create a new task.
+    """Handle ``/bernstein run <task>`` - create a new task.
 
     Args:
         request: Incoming FastAPI request.
@@ -188,7 +192,7 @@ async def _handle_run(request: Request, options: dict[str, Any], payload: dict[s
 
 
 def _handle_status(request: Request, _payload: dict[str, Any]) -> JSONResponse:
-    """Handle ``/bernstein status`` — show current task summary.
+    """Handle ``/bernstein status`` - show current task summary.
 
     Args:
         request: Incoming FastAPI request.
@@ -215,7 +219,7 @@ def _handle_status(request: Request, _payload: dict[str, Any]) -> JSONResponse:
 
 
 def _handle_stop(_request: Request, _payload: dict[str, Any]) -> JSONResponse:
-    """Handle ``/bernstein stop`` — request graceful shutdown.
+    """Handle ``/bernstein stop`` - request graceful shutdown.
 
     Posts a shutdown signal to the orchestrator's ``/shutdown`` endpoint
     asynchronously. The current run drains cleanly before exiting.
@@ -231,14 +235,15 @@ def _handle_stop(_request: Request, _payload: dict[str, Any]) -> JSONResponse:
         import httpx
 
         httpx.post("http://127.0.0.1:8052/shutdown", timeout=3.0)
-    except Exception:
+    except (httpx.HTTPError, OSError):
+        # Shutdown is best-effort: orchestrator may already be stopped or unreachable.
         logger.debug("Discord stop: failed to reach shutdown endpoint", exc_info=True)
 
     return _ephemeral("Graceful shutdown requested. Bernstein will finish in-flight tasks and exit.")
 
 
 def _handle_cost(_request: Request, _payload: dict[str, Any]) -> JSONResponse:
-    """Handle ``/bernstein cost`` — show cumulative spend report.
+    """Handle ``/bernstein cost`` - show cumulative spend report.
 
     Reads cost data from the task store metrics and returns a summary.
 
@@ -262,7 +267,8 @@ def _handle_cost(_request: Request, _payload: dict[str, Any]) -> JSONResponse:
             if budget > 0:
                 lines.append(f"Budget: ${budget:.2f} ({pct:.1f}% used)")
             return _ephemeral("\n".join(lines))
+    # bot-ack: pre-existing-1723 (status endpoint may be down; best-effort fetch)
     except Exception:
         logger.debug("Discord cost: failed to reach status endpoint", exc_info=True)
 
-    return _ephemeral("Could not retrieve cost data — is Bernstein running?")
+    return _ephemeral("Could not retrieve cost data - is Bernstein running?")

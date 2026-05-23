@@ -1,7 +1,7 @@
 """Goose CLI adapter for Bernstein.
 
 Adapter for Goose (https://github.com/block/goose), now stewarded by the
-Agentic AI Foundation (Linux Foundation) — the GitHub org has moved from
+Agentic AI Foundation (Linux Foundation) - the GitHub org has moved from
 ``block/goose`` to ``aaif-goose/goose`` while binary releases continue under
 the ``block/goose`` releases page.  Goose is an AI agent that can execute
 tasks autonomously; this adapter allows Bernstein to orchestrate Goose as a
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Model mapping: Bernstein logical names → Goose model IDs
-# Updated 2026-04-17 — keep Opus alias in sync with claude.py canonical ID.
+# Updated 2026-04-17 - keep Opus alias in sync with claude.py canonical ID.
 _MODEL_MAP: dict[str, str] = {
     "opus": "claude-opus-4-7",
     "opus-4-6": "claude-opus-4-6",  # pinned fallback
@@ -63,6 +63,7 @@ class GooseAdapter(CLIAdapter):
         task_scope: str = "medium",
         budget_multiplier: float = 1.0,
         system_addendum: str = "",
+        multimodal_context: Any | None = None,
     ) -> SpawnResult:
         """Launch a Goose agent process.
 
@@ -80,6 +81,7 @@ class GooseAdapter(CLIAdapter):
         Raises:
             RuntimeError: If the Goose binary is not found.
         """
+        self.refuse_multimodal_if_needed(multimodal_context)
         self.enforce_network_policy()
         log_path = workdir / ".sdd" / "runtime" / f"{session_id}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -101,7 +103,7 @@ class GooseAdapter(CLIAdapter):
             model=model_id,
         )
 
-        # Always pass an explicit ``env=`` — Popen with env=None inherits
+        # Always pass an explicit ``env=`` - Popen with env=None inherits
         # the orchestrator's full environment, which is a credential-leak
         # vector (DB URLs, internal tokens, unrelated provider keys).
         # Goose accepts model creds via Anthropic/OpenAI/OpenRouter envs.

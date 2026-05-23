@@ -26,7 +26,7 @@ jobs:
 
     steps:
       - name: Harden runner (audit mode)
-        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -94,7 +94,7 @@ jobs:
           registryUrl: https://marketplace.visualstudio.com
           extensionFile: ${{ steps.vsix.outputs.path }}
 
-      # Publish to Open VSX — used by Cursor, VSCodium, Gitpod (requires OPEN_VSX_TOKEN secret)
+      # Publish to Open VSX - used by Cursor, VSCodium, Gitpod (requires OPEN_VSX_TOKEN secret)
       # continue-on-error: version may already exist if re-running for same tag
       - name: Publish to Open VSX
         if: env.OPEN_VSX_TOKEN != ''
@@ -106,4 +106,4 @@ jobs:
           extensionFile: ${{ steps.vsix.outputs.path }}
 
       # VSIX is published to VS Code Marketplace and Open VSX above.
-      # No GitHub Release — avoids cluttering the main release list.
+      # No GitHub Release - avoids cluttering the main release list.

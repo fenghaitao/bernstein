@@ -8,6 +8,7 @@ to prove the harness catches regressions.
 from __future__ import annotations
 
 import json
+from itertools import count
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -217,7 +218,7 @@ def test_popen_target_contains_module_path() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ConformanceHarness.replay_step — happy path
+# ConformanceHarness.replay_step - happy path
 # ---------------------------------------------------------------------------
 
 
@@ -251,7 +252,7 @@ def test_replay_step_passes_for_generic_adapter(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Broken adapter stub — used to test exception detection
+# Broken adapter stub - used to test exception detection
 # ---------------------------------------------------------------------------
 
 
@@ -300,7 +301,7 @@ class _WrongExceptionAdapter(CLIAdapter):
 
 
 # ---------------------------------------------------------------------------
-# ConformanceHarness.replay_step — exception handling
+# ConformanceHarness.replay_step - exception handling
 # ---------------------------------------------------------------------------
 
 
@@ -501,10 +502,20 @@ def test_golden_transcripts_all_pass(tmp_path: Path) -> None:
         pytest.skip("No golden transcripts found")
 
     harness = ConformanceHarness()
-    # Patch subprocess at the base level for all adapters
-    with patch("bernstein.adapters.codex.subprocess.Popen", side_effect=[_make_popen(i) for i in range(100)]):
-        with patch("bernstein.adapters.generic.subprocess.Popen", side_effect=[_make_popen(i) for i in range(100)]):
-            report = harness.run_all(transcripts, workdir=tmp_path)
+    # Patch subprocess at the base level for the adapters the harness
+    # actually drives. Gemini joined the patched set in #1740 when the
+    # discovery cascade started returning ``antigravity`` as the
+    # non-strict default, which subprocess.Popen would otherwise try
+    # to spawn for real in CI where neither binary is installed.
+    # Use unbounded iterators so the test stays stable as transcript
+    # coverage grows: a fixed-length list would raise ``StopIteration``
+    # once the harness needed more than 100 Popen invocations.
+    with (
+        patch("bernstein.adapters.codex.subprocess.Popen", side_effect=(_make_popen(i) for i in count())),
+        patch("bernstein.adapters.generic.subprocess.Popen", side_effect=(_make_popen(i) for i in count())),
+        patch("bernstein.adapters.gemini.subprocess.Popen", side_effect=(_make_popen(i) for i in count())),
+    ):
+        report = harness.run_all(transcripts, workdir=tmp_path)
 
     failed = report.regressions
     assert not failed, f"Golden transcript conformance FAILED: {failed}"
@@ -529,6 +540,13 @@ def test_scaffold_contains_name_method() -> None:
 def test_scaffold_contains_spawn_method() -> None:
     code = generate_adapter_scaffold("MyAgent", "MyAgentAdapter", "myagent", "myagent")
     assert "def spawn(" in code
+
+
+def test_scaffold_spawn_signature_matches_optional_base_kwargs() -> None:
+    code = generate_adapter_scaffold("MyAgent", "MyAgentAdapter", "myagent", "myagent")
+    assert "budget_multiplier: float = 1.0" in code
+    assert 'system_addendum: str = ""' in code
+    assert "multimodal_context: Any | None = None" in code
 
 
 def test_scaffold_is_valid_python_syntax() -> None:

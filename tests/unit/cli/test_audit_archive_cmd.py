@@ -43,7 +43,7 @@ def audit_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     Pinning ``BERNSTEIN_AUDIT_KEY_PATH`` at a tmp path keeps every test
     away from the operator's real audit key under ``~/.local/state/``.
     The same key seeds both the AuditLog instances used to build the
-    fixture log AND the archive command's verify pass — without this
+    fixture log AND the archive command's verify pass - without this
     matching, the post-archive verify would always fail.
     """
     audit_dir = tmp_path / ".sdd" / "audit"
@@ -67,7 +67,7 @@ def _seed_clean_log(
 ) -> list[str]:
     """Seed ``audit_dir/<day>.jsonl`` with HMAC-correct chained entries.
 
-    The AuditLog writer always writes to today's filename — we need a
+    The AuditLog writer always writes to today's filename - we need a
     deterministic filename (so ``--before`` can target it), so we
     build entries by hand using the public canonical-form HMAC math
     from ``bernstein.core.security.audit``.
@@ -303,7 +303,7 @@ def test_already_archived_file_refuses_re_archive(audit_env: Path, tmp_path: Pat
     )
     assert result1.exit_code == 0, result1.output
 
-    # Re-seed a new corrupt file with the same filename — simulates an
+    # Re-seed a new corrupt file with the same filename - simulates an
     # operator who accidentally points two cleanup runs at the same
     # archive dir.
     _corrupt_file_via_wrong_key(audit_env, "2026-04-26", count=2)
@@ -417,3 +417,48 @@ def test_archive_refuses_proc_path(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     )
     assert result.exit_code == 1, result.output
     assert "Refusing to operate" in result.output or "Refusing to archive" in result.output
+
+
+# ---------------------------------------------------------------------------
+# _is_safe_audit_dir boundary (platform-independent)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    [
+        # Exact mount roots: a symlink to /proc resolves to "/proc" with NO
+        # trailing slash, so a startswith("/proc/") check silently lets it
+        # through. These exact-root cases are the regression that landed red.
+        "/proc",
+        "/dev",
+        "/sys",
+        # Children must also be refused.
+        "/proc/self",
+        "/dev/null",
+        "/sys/kernel",
+    ],
+)
+def test_is_safe_audit_dir_refuses_pseudo_filesystems(unsafe: str) -> None:
+    from bernstein.cli.commands.audit_cmd import _is_safe_audit_dir
+
+    safe, reason = _is_safe_audit_dir(Path(unsafe))
+    assert safe is False, f"expected {unsafe} to be refused, got safe=True"
+    assert "refusing to operate" in reason.lower()
+
+
+@pytest.mark.parametrize(
+    "ok",
+    [
+        # Lookalike prefixes that merely *start* with the pseudo-fs token must
+        # NOT be refused (e.g. /procurement, /devel, /system).
+        "/procurement/audit",
+        "/devel/audit",
+        "/system/audit",
+    ],
+)
+def test_is_safe_audit_dir_allows_lookalike_prefixes(ok: str) -> None:
+    from bernstein.cli.commands.audit_cmd import _is_safe_audit_dir
+
+    safe, _reason = _is_safe_audit_dir(Path(ok))
+    assert safe is True, f"expected {ok} to be allowed, got safe=False"

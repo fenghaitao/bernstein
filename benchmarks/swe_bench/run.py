@@ -46,12 +46,11 @@ from benchmarks.swe_bench.harness import Harness, HarnessConfig  # noqa: E402
 from benchmarks.swe_bench.metrics import ResultStore, ScenarioSummary  # noqa: E402
 from benchmarks.swe_bench.report import generate_from_results_dir  # noqa: E402
 from benchmarks.swe_bench.scenarios import ALL_SCENARIOS, SCENARIO_BY_NAME  # noqa: E402
-
 from bernstein.benchmark.head_to_head import CANONICAL_COMPARISON, generate_full_report  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+    format="%(asctime)s %(levelname)s %(name)s - %(message)s",
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("bernstein.swe_bench")

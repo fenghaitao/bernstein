@@ -55,8 +55,8 @@ class RemoteServerConfig:
     Attributes:
         name: Human-readable identifier for the server.
         url: Base URL of the remote MCP server.
-        transport: Transport type — ``"streamable-http"`` or ``"sse"``.
-        auth_type: Authentication method — ``"none"``, ``"bearer"``, or ``"oauth"``.
+        transport: Transport type - ``"streamable-http"`` or ``"sse"``.
+        auth_type: Authentication method - ``"none"``, ``"bearer"``, or ``"oauth"``.
         auth_token: Bearer token when auth_type is ``"bearer"``.
         oauth_client_id: OAuth client ID when auth_type is ``"oauth"``.
         oauth_client_secret: OAuth client secret when auth_type is ``"oauth"``.
@@ -587,6 +587,7 @@ class MCPClientSession:
             MCPCapabilityMissing: If the tool is not in the capability card.
             MCPStreamDropped: If retries are exhausted before completion.
         """
+        _ = arguments
         self._validate_capability(tool_name)
         call = handle if handle is not None else StreamedToolCall(self._config.name, tool_name)
         idempotency_key = str(uuid.uuid4())

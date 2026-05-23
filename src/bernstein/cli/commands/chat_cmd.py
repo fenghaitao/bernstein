@@ -50,6 +50,11 @@ _ENV_TOKEN_MAP = {
     "slack": "BERNSTEIN_SLACK_TOKEN",
 }
 
+#: Slack Socket Mode app-level token env var. Bot token (``xoxb-...``) goes
+#: in ``BERNSTEIN_SLACK_TOKEN``; the Socket Mode app token (``xapp-...``)
+#: lives separately so operators can rotate the two independently.
+_SLACK_APP_TOKEN_ENV = "BERNSTEIN_SLACK_APP_TOKEN"
+
 
 @click.group("chat")
 def chat_group() -> None:
@@ -81,12 +86,16 @@ def chat_serve(platform: str, token: str | None, allow: str | None) -> None:
         raise click.UsageError(
             "Telegram requires `bernstein connect telegram`, --token, or $BERNSTEIN_TELEGRAM_TOKEN.",
         )
+    if platform == "discord" and not resolved_token:
+        raise click.UsageError(
+            "Discord requires `--token` or $BERNSTEIN_DISCORD_TOKEN.",
+        )
 
     overrides = _split_allow(allow)
     allow_list = load_allow_list(workdir / "bernstein.yaml", cli_override=overrides)
     bindings = BindingStore(workdir)
     driver_cls: Any = load_driver(platform)
-    bridge: BridgeProtocol = driver_cls(resolved_token)
+    bridge: BridgeProtocol = _instantiate_bridge(driver_cls, platform, resolved_token)
     session = ChatSession(bridge, bindings, allow_list, workdir)
     session.install_handlers()
 
@@ -95,9 +104,6 @@ def chat_serve(platform: str, token: str | None, allow: str | None) -> None:
         asyncio.run(session.run_forever())
     except KeyboardInterrupt:
         click.echo("chat: interrupted, shutting down.")
-    except NotImplementedError as exc:
-        click.echo(f"chat: {exc}", err=True)
-        raise SystemExit(2) from exc
 
 
 @chat_group.command("status")
@@ -330,11 +336,11 @@ class ChatSession:
         await self.bridge.send_message(msg.thread_id, "Stop requested. Session will wind down gracefully.")
 
     async def _on_handoff(self, msg: ChatMessage) -> None:
-        """Handle ``/handoff [<token>]`` — emit or claim a resume token (op-005).
+        """Handle ``/handoff [<token>]`` - emit or claim a resume token (op-005).
 
         With no argument, freezes the current thread's binding and emits
         a token. With a token argument, claims it and rebinds this
-        thread to the same session — the live stream will continue to
+        thread to the same session - the live stream will continue to
         flow into the new thread without interrupting any in-flight
         tool calls because the session id is preserved.
         """
@@ -606,6 +612,25 @@ def _resolve_chat_token(platform: str) -> str:
         if resolution.found:
             return resolution.secret
     return os.environ.get(_ENV_TOKEN_MAP[platform], "")
+
+
+def _instantiate_bridge(driver_cls: Any, platform: str, token: str) -> BridgeProtocol:
+    """Construct the driver with platform-appropriate kwargs.
+
+    Telegram and Discord take a single ``token`` positional; Slack
+    additionally needs the Socket Mode app token from
+    ``BERNSTEIN_SLACK_APP_TOKEN``. Surface a clear error rather than
+    instantiating with an empty app token (the driver itself rejects it,
+    but the CLI's message is more actionable).
+    """
+    if platform == "slack":
+        app_token = os.environ.get(_SLACK_APP_TOKEN_ENV, "")
+        if not app_token:
+            raise click.UsageError(
+                f"Slack requires the Socket Mode app token in ${_SLACK_APP_TOKEN_ENV} (in addition to the bot token).",
+            )
+        return driver_cls(token=token, app_token=app_token)
+    return driver_cls(token)
 
 
 def _extract_quoted_goal(msg: ChatMessage) -> str:

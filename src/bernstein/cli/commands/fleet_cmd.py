@@ -1,4 +1,4 @@
-"""``bernstein fleet`` — supervisory dashboard across multiple projects.
+"""``bernstein fleet`` - supervisory dashboard across multiple projects.
 
 This is the CLI entry point. The actual aggregator and rendering live in
 :mod:`bernstein.core.fleet`; this module only wires Click subcommands to
@@ -137,6 +137,36 @@ def _fallback_table_render(aggregator: FleetAggregator, config: FleetConfig) -> 
     _console.print(table)
     _console.print(format_footer(config, rows, total))
 
+    supervisor_line = _fleet_supervisor_summary_line()
+    if supervisor_line:
+        _console.print(f"[dim]{supervisor_line}[/dim]")
+
+
+def _fleet_supervisor_summary_line() -> str:
+    """Return the stuck-count summary across the fleet's primary workspace.
+
+    The fleet view aggregates many projects but a single operator sits
+    inside one workspace, so we surface the supervisor snapshot for that
+    workspace as the most actionable signal. Returns an empty string on
+    any aggregator failure so the fleet command never errors here.
+    Failures are logged so an operator-visible drop can be debugged from
+    the orchestrator log without restarting the fleet view.
+    """
+    try:
+        from pathlib import Path as _Path
+
+        from bernstein.core.defaults import AGENT
+        from bernstein.core.orchestration.supervisor_aggregator import (
+            aggregator_snapshot,
+            format_summary_line,
+        )
+
+        snapshot = aggregator_snapshot(_Path.cwd(), heartbeat_stale_s=AGENT.heartbeat_stale_s)
+    except Exception:  # pragma: no cover - fleet renderer must never raise
+        logger.exception("fleet supervisor-summary aggregation failed")
+        return ""
+    return format_summary_line(snapshot)
+
 
 def _parse_bind(bind: str) -> tuple[str, int]:
     text = bind.strip()
@@ -190,7 +220,7 @@ def _bulk_target(
     """Resolve a target list using the *static* config snapshot.
 
     Unlike the TUI, the CLI bulk path doesn't need the live aggregator
-    — projects are filtered by their on-disk cost history when a filter
+    - projects are filtered by their on-disk cost history when a filter
     references ``cost``.
     """
     from bernstein.core.fleet.aggregator import ProjectSnapshot, ProjectState
@@ -291,7 +321,7 @@ def bulk_cost_report_cmd(
 def ls_cmd(ctx: click.Context) -> None:
     """List configured projects without launching the dashboard."""
     config = _resolve_config(ctx.obj.get("config_path"))
-    table = Table(title="Bernstein fleet — configured projects")
+    table = Table(title="Bernstein fleet - configured projects")
     table.add_column("Name")
     table.add_column("Path")
     table.add_column("Task server")

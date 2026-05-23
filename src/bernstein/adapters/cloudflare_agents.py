@@ -55,6 +55,7 @@ class CloudflareAgentsAdapter(CLIAdapter):
         task_scope: str = "medium",
         budget_multiplier: float = 1.0,
         system_addendum: str = "",
+        multimodal_context: Any | None = None,
     ) -> SpawnResult:
         """Launch a Cloudflare Agents worker via ``npx wrangler dev``.
 
@@ -76,6 +77,7 @@ class CloudflareAgentsAdapter(CLIAdapter):
             RuntimeError: If ``npx`` is not found or permission is denied.
             NetworkPolicyDenied: When the active --allow-network policy denies api.cloudflare.com.
         """
+        self.refuse_multimodal_if_needed(multimodal_context)
         self.enforce_network_policy()
         log_path = workdir / ".sdd" / "runtime" / f"{session_id}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -83,9 +85,9 @@ class CloudflareAgentsAdapter(CLIAdapter):
         account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID") or os.environ.get("CF_ACCOUNT_ID")
         api_token = os.environ.get("CLOUDFLARE_API_TOKEN") or os.environ.get("CF_API_TOKEN")
         if not account_id:
-            logger.warning("CloudflareAgentsAdapter: CLOUDFLARE_ACCOUNT_ID is not set — spawn may fail")
+            logger.warning("CloudflareAgentsAdapter: CLOUDFLARE_ACCOUNT_ID is not set - spawn may fail")
         if not api_token:
-            logger.warning("CloudflareAgentsAdapter: CLOUDFLARE_API_TOKEN is not set — spawn may fail")
+            logger.warning("CloudflareAgentsAdapter: CLOUDFLARE_API_TOKEN is not set - spawn may fail")
 
         full_prompt = f"{prompt}\n\n{system_addendum}".strip() if system_addendum else prompt
 

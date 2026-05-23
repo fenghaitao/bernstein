@@ -227,7 +227,7 @@ def set_rate_limit_emit_callback(
 
     The orchestrator owns its :class:`HookRegistry`; calling this with a
     bound emit lets adapters surface the event without importing the
-    lifecycle subsystem directly. Passing ``None`` clears the binding —
+    lifecycle subsystem directly. Passing ``None`` clears the binding -
     used by tests that want to assert no event was emitted.
     """
     global _RATE_LIMIT_EMIT
@@ -241,7 +241,7 @@ def fold_rate_limit_events(
 ) -> list[str]:
     """Collapse a sequence of ``rate_limit.hit`` events into one line per adapter.
 
-    Each input dict is expected to carry at least an ``adapter`` key — the
+    Each input dict is expected to carry at least an ``adapter`` key - the
     standard payload emitted by :func:`record_rate_limit_hit`. Events
     missing an adapter label are grouped under ``"unknown"`` so they
     remain visible to operators rather than being silently dropped.
@@ -467,6 +467,39 @@ class CLIAdapter(ABC):
         for host, port in self.external_endpoints:
             policy.check(host, port, source=f"adapter:{self.name()}")
 
+    def refuse_multimodal_if_needed(self, multimodal_context: Any | None) -> None:
+        """Reject attachments for adapters that do not support multimodal input.
+
+        Args:
+            multimodal_context: Optional multimodal context from the worker
+                launch path.
+
+        Raises:
+            CapabilityRefusal: When attachments are present and this adapter is
+                not registered as multimodal-capable.
+        """
+        if multimodal_context is None:
+            return
+
+        inputs = getattr(multimodal_context, "inputs", ()) or ()
+        attachments: list[str] = []
+        for input_item in inputs:
+            content_path = getattr(input_item, "content_path", None)
+            if content_path is not None:
+                attachments.append(str(content_path))
+                continue
+            description = getattr(input_item, "description", "") or "<inline attachment>"
+            attachments.append(str(description))
+        if not attachments:
+            return
+
+        from bernstein.core.agents.multimodal_attestation import refuse_when_incapable
+
+        refuse_when_incapable(
+            adapter_name=self._derive_session_namespace(),
+            attachments=tuple(attachments),
+        )
+
     def set_resource_limits(self, limits: ResourceLimits | None) -> None:
         """Configure OS-level resource limits applied to spawned child processes.
 
@@ -503,6 +536,7 @@ class CLIAdapter(ABC):
         task_scope: str = "medium",
         budget_multiplier: float = 1.0,
         system_addendum: str = "",
+        multimodal_context: Any | None = None,
     ) -> SpawnResult:
         """Launch an agent process with the given prompt.
 
@@ -523,6 +557,14 @@ class CLIAdapter(ABC):
                 Adapters that support a separate system prompt (e.g. Claude
                 Code's ``--append-system-prompt``) should use it; others
                 may append to the user prompt as a fallback.
+            multimodal_context: Optional
+                :class:`bernstein.core.agents.multimodal.MultiModalContext`
+                carrying base64-encoded attachments to be passed to the
+                model API. Multimodal-capable adapters (Claude, Gemini)
+                encode the attached bytes inline in the request body;
+                other adapters MUST raise :class:`CapabilityRefusal`
+                before any process is launched (see
+                :func:`bernstein.core.agents.multimodal_attestation.refuse_when_incapable`).
         """
         ...
 
@@ -542,12 +584,12 @@ class CLIAdapter(ABC):
             session_id: Session identifier for structured logging.
 
         Returns:
-            The started Timer — caller should store it for cancellation.
+            The started Timer - caller should store it for cancellation.
         """
 
         def _kill_on_timeout() -> None:
             logger.warning(
-                "Timeout after %ds: pid=%d session=%s — sending SIGTERM",
+                "Timeout after %ds: pid=%d session=%s - sending SIGTERM",
                 timeout_seconds,
                 pid,
                 session_id,
@@ -563,7 +605,7 @@ class CLIAdapter(ABC):
                 time.sleep(1)
 
             logger.warning(
-                "Agent did not exit after SIGTERM grace period: pid=%d session=%s — sending SIGKILL",
+                "Agent did not exit after SIGTERM grace period: pid=%d session=%s - sending SIGKILL",
                 pid,
                 session_id,
             )
@@ -683,13 +725,13 @@ class CLIAdapter(ABC):
 
         Processes are spawned with ``start_new_session=True``, so the PID
         equals the PGID.  Using the PID directly avoids ``os.getpgid()``
-        failing when the wrapper process has already exited — this prevents
+        failing when the wrapper process has already exited - this prevents
         orphan child processes from accumulating.
 
         Sends SIGTERM first, polls for exit for a short grace period, then
         escalates to SIGKILL if the group is still alive.  Without this
         escalation, agents that trap SIGTERM survive reap paths (wall-clock
-        timeout and stale heartbeat) — see prior audit.
+        timeout and stale heartbeat) - see prior audit.
         """
         kill_process_group_graceful(pid)
 
@@ -761,7 +803,7 @@ class CLIAdapter(ABC):
         ``RESUME_CAPABILITY_MATRIX``). Adapters that can stitch back into a
         provider-side session override this method and return a
         :class:`SpawnResult`. The default returns ``None`` to signal "I
-        cannot resume natively — please fall back to a fresh spawn with
+        cannot resume natively - please fall back to a fresh spawn with
         scratchpad reinjection".
 
         Args:
@@ -948,7 +990,7 @@ def post_write_lineage_hook(
 
     Soft mode (the v1 default): any failure inside the recorder is caught,
     logged at WARNING level, and the function returns ``None``. Lineage is
-    additive — a recorder bug must never block a successful write from
+    additive - a recorder bug must never block a successful write from
     completing.
 
     Returns:
@@ -971,7 +1013,7 @@ def post_write_lineage_hook(
         )
     except Exception as exc:
         logger.warning(
-            "lineage post-write hook failed for %s (soft mode — write proceeds): %s",
+            "lineage post-write hook failed for %s (soft mode - write proceeds): %s",
             artefact_path,
             exc,
         )

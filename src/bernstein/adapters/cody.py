@@ -62,6 +62,7 @@ class CodyAdapter(CLIAdapter):
         task_scope: str = "medium",
         budget_multiplier: float = 1.0,
         system_addendum: str = "",
+        multimodal_context: Any | None = None,
     ) -> SpawnResult:
         """Launch a Cody agent process.
 
@@ -79,13 +80,14 @@ class CodyAdapter(CLIAdapter):
         Raises:
             RuntimeError: If ``cody`` is not found in PATH.
         """
+        self.refuse_multimodal_if_needed(multimodal_context)
         self.enforce_network_policy()
         log_path = workdir / ".sdd" / "runtime" / f"{session_id}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
         if not os.environ.get("SRC_ACCESS_TOKEN"):
             logger.warning(
-                "CodyAdapter: SRC_ACCESS_TOKEN not set — spawn may fail. "
+                "CodyAdapter: SRC_ACCESS_TOKEN not set - spawn may fail. "
                 "Run 'cody auth login' or set SRC_ACCESS_TOKEN and SRC_ENDPOINT."
             )
         if mcp_config:

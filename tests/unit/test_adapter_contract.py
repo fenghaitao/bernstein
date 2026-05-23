@@ -1,9 +1,9 @@
-"""Parameterized contract tests — all adapters satisfy CLIAdapter interface.
+"""Parameterized contract tests - all adapters satisfy CLIAdapter interface.
 
 The adapter list is discovered dynamically from the registry so that newly
 registered adapters are automatically exercised by the contract suite.  A
 second suite replays recorded golden transcripts (``tests/golden/*.yaml``)
-and asserts the actual Popen argv still matches — this catches silent CLI
+and asserts the actual Popen argv still matches - this catches silent CLI
 flag regressions that pure interface checks miss.
 """
 
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import inspect
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -22,6 +22,8 @@ from bernstein.core.models import ModelConfig
 from bernstein.adapters.base import CLIAdapter, SpawnResult
 from bernstein.adapters.generic import GenericAdapter
 from bernstein.adapters.registry import _ADAPTERS, get_adapter
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -41,8 +43,28 @@ def _popen_path(adapter: CLIAdapter) -> str:
     return f"{mod}.subprocess.Popen"
 
 
+def _sonar_properties() -> dict[str, str]:
+    """Return logical key-value entries from sonar-project.properties."""
+    properties: dict[str, str] = {}
+    pending = ""
+    for raw_line in (PROJECT_ROOT / "sonar-project.properties").read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.endswith("\\"):
+            pending += line[:-1]
+            continue
+        line = f"{pending}{line}"
+        pending = ""
+        if "=" not in line:
+            continue
+        key, value = line.split("=", maxsplit=1)
+        properties[key.strip()] = value.strip()
+    return properties
+
+
 # ---------------------------------------------------------------------------
-# Adapter factories — dynamically discovered from the adapter registry.
+# Adapter factories - dynamically discovered from the adapter registry.
 #
 # The mock adapter is excluded because it spawns a real subprocess (it is
 # the fixture backing live conformance tests) rather than going through the
@@ -56,18 +78,18 @@ def _discover_registered_names() -> list[str]:
     """Return sorted adapter names registered in the adapter registry.
 
     Excludes:
-    - ``mock`` — spawns a real subprocess (live conformance fixture).
-    - ``generic`` — constructed with explicit kwargs below.
-    - ``iac`` — spawn() raises RuntimeError unless terraform or pulumi is
+    - ``mock`` - spawns a real subprocess (live conformance fixture).
+    - ``generic`` - constructed with explicit kwargs below.
+    - ``iac`` - spawn() raises RuntimeError unless terraform or pulumi is
       on PATH; CI runners (especially macOS) don't have these and the
       contract test mocks Popen but can't mock the binary-availability
       check.  The adapter has its own integration test that skips when
       no tool is installed.
-    - ``clm`` — spawn() raises ClmConfigError unless CLM_ENDPOINT/TOKEN/MODEL
+    - ``clm`` - spawn() raises ClmConfigError unless CLM_ENDPOINT/TOKEN/MODEL
       are set; the contract test mocks Popen but can't satisfy the runtime
       config requirement.  Covered by ``test_adapter_clm.py`` and the
       integration suite under ``tests/integration/adapters/``.
-    - ``q_dev`` — spawn() raises SpawnError unless a ``q login`` cache
+    - ``q_dev`` - spawn() raises SpawnError unless a ``q login`` cache
       exists on disk; CI runners don't have one and the contract test
       mocks Popen but can't fake an authenticated AWS Builder ID
       session.  Covered by ``test_adapter_q_dev.py`` which monkeypatches
@@ -105,7 +127,7 @@ _ADAPTER_FACTORIES: list[tuple[str, Any]] = [
 class TestAdapterContract:
     """Every adapter must satisfy the CLIAdapter abstract interface.
 
-    The watchdog-threads fixture is applied class-wide — the contract
+    The watchdog-threads fixture is applied class-wide - the contract
     suite parameterizes across every registered adapter, and each
     ``spawn()`` call would otherwise arm a daemon Timer that outlives
     the test and eventually hits the runner's thread limit on CI.
@@ -148,13 +170,7 @@ class TestAdapterContract:
 
     def test_spawn_signature_matches_base(self, name: str, factory: Any) -> None:
         adapter = factory()
-        sig = inspect.signature(adapter.spawn)
-        params = list(sig.parameters.keys())
-        assert "prompt" in params
-        assert "workdir" in params
-        assert "model_config" in params
-        assert "session_id" in params
-        assert "mcp_config" in params
+        assert inspect.signature(type(adapter).spawn) == inspect.signature(CLIAdapter.spawn)
 
     def test_spawn_returns_spawn_result(self, name: str, factory: Any, tmp_path: Path) -> None:
         adapter = factory()
@@ -201,8 +217,29 @@ class TestAdapterContract:
             assert isinstance(result, ApiTierInfo)
 
 
+def test_sonar_s2638_exclusion_is_scoped_to_adapter_spawn_contracts() -> None:
+    """Adapter overrides keep the base signature; the Sonar exclusion stays narrow."""
+    properties = _sonar_properties()
+    criteria = [item.strip() for item in properties["sonar.issue.ignore.multicriteria"].split(",")]
+    matching_resource_keys = [
+        properties[f"sonar.issue.ignore.multicriteria.{criterion}.resourceKey"]
+        for criterion in criteria
+        if properties.get(f"sonar.issue.ignore.multicriteria.{criterion}.ruleKey") == "python:S2638"
+    ]
+
+    assert matching_resource_keys == ["src/bernstein/adapters/*.py"]
+
+
+def test_sonar_s2638_exclusion_matches_top_level_adapters() -> None:
+    """The scoped S2638 exclusion must match Sonar's top-level adapter paths."""
+    properties = _sonar_properties()
+    resource_key = properties["sonar.issue.ignore.multicriteria.e18.resourceKey"]
+
+    assert PurePosixPath("src/bernstein/adapters/aichat.py").match(resource_key)
+
+
 # ---------------------------------------------------------------------------
-# Golden transcript replay — catches CLI flag regressions that interface
+# Golden transcript replay - catches CLI flag regressions that interface
 # checks miss.  Each transcript records the inner CLI argv (after the
 # ``bernstein-worker -- `` separator) and the set of credential env keys
 # the adapter declared via ``build_filtered_env``.
@@ -319,6 +356,20 @@ class TestGoldenReplay:
         if hasattr(adapter_module, "build_filtered_env"):
             monkeypatch.setattr(adapter_module, "build_filtered_env", _spy)
 
+        # Gemini adapter consults `shutil.which` to pick between the
+        # `antigravity` and `gemini` binaries (#1740 cascade). On hosts
+        # where only one happens to be installed, the recorded golden
+        # would drift from the actual argv. Pin the resolver to "neither
+        # installed" so non-strict discovery returns the first cascade
+        # entry deterministically across local + CI runs. Scoped to the
+        # gemini adapter to avoid leaking into other tests' subprocess
+        # lookups (shutil is a shared module).
+        if adapter_cls.__module__ == "bernstein.adapters.gemini":
+            monkeypatch.setattr(
+                "bernstein.adapters.gemini.resolve_google_cli_binary",
+                lambda **_kw: "antigravity",
+            )
+
         default_role = str(transcript.get("session_role") or "replay")
         for step_idx, step in enumerate(transcript.get("steps", [])):
             prompt = str(step["prompt"])
@@ -353,7 +404,7 @@ class TestGoldenReplay:
 
             if expected_argv is not None:
                 expected_list = [str(x) for x in expected_argv]
-                # Strip payload args for JSON-valued flags — their content is
+                # Strip payload args for JSON-valued flags - their content is
                 # version-sensitive; the flag's presence is asserted below.
                 stripped_inner = _strip_json_payloads(inner, required_json_flags)
                 stripped_expected = _strip_json_payloads(expected_list, required_json_flags)

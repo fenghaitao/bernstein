@@ -36,13 +36,15 @@ class KiroAdapter(CLIAdapter):
         task_scope: str = "medium",
         budget_multiplier: float = 1.0,
         system_addendum: str = "",
+        multimodal_context: Any | None = None,
     ) -> SpawnResult:
+        self.refuse_multimodal_if_needed(multimodal_context)
         self.enforce_network_policy()
         log_path = workdir / ".sdd" / "runtime" / f"{session_id}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
         if not (os.environ.get("KIRO_API_KEY") or (Path.home() / ".kiro").exists()):
-            logger.warning("KiroAdapter: no Kiro auth detected — spawn may fail until `kiro-cli login` completes")
+            logger.warning("KiroAdapter: no Kiro auth detected - spawn may fail until `kiro-cli login` completes")
         if model_config.model and model_config.model.lower() != "auto":
             logger.info(
                 "KiroAdapter: requested model %s for session %s; current Kiro CLI docs "

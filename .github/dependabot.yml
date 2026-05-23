@@ -5,7 +5,7 @@ updates:
     schedule:
       interval: weekly
     # Wait a few days after upstream release before opening a bump PR
-    # so a fast-follow patch can catch up — and longer for majors
+    # so a fast-follow patch can catch up - and longer for majors
     # (zizmor dependabot-cooldown).
     cooldown:
       default-days: 7
@@ -51,10 +51,11 @@ updates:
       interval: weekly
       day: tuesday
     # Same cooldown rationale as the pip ecosystem above
-    # (zizmor dependabot-cooldown).
+    # (zizmor dependabot-cooldown). The github-actions ecosystem only
+    # supports default-days at present; per-semver-tier days raise
+    # "property not supported" at config-validation time.
     cooldown:
       default-days: 7
-      semver-major-days: 14
     open-pull-requests-limit: 5
     labels:
       - "dependencies"

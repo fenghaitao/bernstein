@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-import subprocess
 from contextlib import suppress
 from dataclasses import asdict
 from pathlib import Path
@@ -56,6 +56,22 @@ def _read_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
         return default
 
 
+def _tasks_by_id(request: Request, store: TaskStore) -> dict[str, Any]:
+    """Return a ``{task.id: task}`` map materialised once per request.
+
+    Both ``observability_agents`` and ``observability_token_budget`` need the
+    same dict in a single request lifecycle. Caching it on ``request.state``
+    avoids rebuilding ``{t.id: t for t in store.list_tasks()}`` twice on each
+    /observability call (issue #1728 finding 2).
+    """
+    cached = getattr(request.state, "tasks_by_id", None)
+    if isinstance(cached, dict):
+        return cast("dict[str, Any]", cached)
+    fresh: dict[str, Any] = {task.id: task for task in store.list_tasks()}
+    request.state.tasks_by_id = fresh
+    return fresh
+
+
 def _overall_trend(scores: list[int]) -> str:
     """Classify the overall score trend from a recent sample."""
     if len(scores) < 4:
@@ -80,7 +96,7 @@ def observability_agents(request: Request) -> dict[str, Any]:
     timeout_s = float(getattr(getattr(request.app.state, "seed_config", None), "heartbeat_timeout_s", 120) or 120)
     monitor = HeartbeatMonitor(workdir, timeout_s=timeout_s)
     aggregator = AgentLogAggregator(workdir)
-    tasks_by_id = {task.id: task for task in store.list_tasks()}
+    tasks_by_id = _tasks_by_id(request, store)
 
     agents: list[dict[str, Any]] = []
     active = 0
@@ -215,7 +231,7 @@ def observability_deps(request: Request) -> dict[str, Any]:
 
 
 @router.get("/recap")
-def recap(request: Request) -> dict[str, Any]:
+async def recap(request: Request) -> dict[str, Any]:
     """Return post-run summary with diff stats, quality scores, and cost breakdown.
 
     Reads completed tasks from the archive and computes:
@@ -225,10 +241,9 @@ def recap(request: Request) -> dict[str, Any]:
     - Cost breakdown by model and role
     """
     workdir = _get_workdir(request)
-    store = _get_store(request)
 
     # Get all tasks from the store
-    all_tasks = store.list_tasks()
+    all_tasks = _get_store(request).list_tasks()
 
     # Compute basic stats
     total = len(all_tasks)
@@ -238,8 +253,8 @@ def recap(request: Request) -> dict[str, Any]:
     n_failed = len(failed_tasks)
     success_rate = round((n_done / total * 100), 1) if total > 0 else 0.0
 
-    # Compute git diff stats
-    diff_stats = _get_git_diff_stats(workdir, done_tasks)
+    # Compute git diff stats (async to avoid blocking the event loop on git)
+    diff_stats = await _get_git_diff_stats(workdir, done_tasks)
 
     # Compute quality score distribution
     quality_scores = _get_quality_score_distribution(workdir, done_tasks)
@@ -302,8 +317,11 @@ def _parse_numstat_output(stdout: str) -> dict[str, Any]:
     }
 
 
-def _get_git_diff_stats(workdir: Path, done_tasks: list[Any]) -> dict[str, Any]:
+async def _get_git_diff_stats(workdir: Path, done_tasks: list[Any]) -> dict[str, Any]:
     """Get git diff statistics for completed tasks.
+
+    Uses ``asyncio.create_subprocess_exec`` so the event loop stays
+    responsive while ``git diff`` runs (issue #1723).
 
     Args:
         workdir: Repository root directory.
@@ -312,47 +330,46 @@ def _get_git_diff_stats(workdir: Path, done_tasks: list[Any]) -> dict[str, Any]:
     Returns:
         Dictionary with files_changed, additions, deletions, and changed_files list.
     """
+    empty: dict[str, Any] = {
+        "files_changed": 0,
+        "additions": 0,
+        "deletions": 0,
+        "changed_files": [],
+    }
     if not done_tasks:
-        return {
-            "files_changed": 0,
-            "additions": 0,
-            "deletions": 0,
-            "changed_files": [],
-        }
+        return empty
 
     try:
         # Get diff stats for all changes since the run started
         # We use git diff HEAD~N where N is the number of commits made during the run
-        result = subprocess.run(
-            ["git", "diff", "--stat", "--numstat"],
-            cwd=workdir,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=10,
-            check=False,
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            "diff",
+            "--stat",
+            "--numstat",
+            cwd=str(workdir),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-
-        if result.returncode != 0:
-            logger.warning("Failed to get git diff stats: %s", result.stderr)
-            return {
-                "files_changed": 0,
-                "additions": 0,
-                "deletions": 0,
-                "changed_files": [],
-            }
-
-        return _parse_numstat_output(result.stdout)
-
-    except (subprocess.TimeoutExpired, OSError) as e:
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=10)
+        except TimeoutError:
+            proc.kill()
+            with suppress(ProcessLookupError):
+                await proc.wait()
+            logger.warning("git diff stats timed out after 10s")
+            return empty
+    except (OSError, FileNotFoundError) as e:
         logger.warning("Error getting git diff stats: %s", e)
-        return {
-            "files_changed": 0,
-            "additions": 0,
-            "deletions": 0,
-            "changed_files": [],
-        }
+        return empty
+
+    if proc.returncode != 0:
+        stderr = stderr_bytes.decode("utf-8", errors="replace")
+        logger.warning("Failed to get git diff stats: %s", stderr)
+        return empty
+
+    stdout = stdout_bytes.decode("utf-8", errors="replace")
+    return _parse_numstat_output(stdout)
 
 
 def _score_to_grade(total: int) -> str:
@@ -769,14 +786,14 @@ def _find_optimization_opportunities(
 
     if system_pct > 30:
         opportunities.append(
-            f"System prompt is ~{system_pct}% of input — consider trimming the role template for this task type"
+            f"System prompt is ~{system_pct}% of input - consider trimming the role template for this task type"
         )
     if context_pct > 60:
         opportunities.append(
-            f"Context files/history are ~{context_pct}% of input — agent may be loading files it never used"
+            f"Context files/history are ~{context_pct}% of input - agent may be loading files it never used"
         )
     if output_pct < 5 and total >= 1000:
-        opportunities.append("Output is <5% of total tokens — agent consumed many tokens producing little output")
+        opportunities.append("Output is <5% of total tokens - agent consumed many tokens producing little output")
     return opportunities
 
 
@@ -845,7 +862,7 @@ def token_breakdown(request: Request) -> dict[str, Any]:
       prior conversation history, etc.)
     - ``output_tokens``: actual assistant output tokens
 
-    Also reports ``optimization_opportunities`` — a list of human-readable
+    Also reports ``optimization_opportunities`` - a list of human-readable
     insights when a category accounts for an unusually large share of tokens
     (e.g. "context files are 60% of input").
 
@@ -861,7 +878,7 @@ def token_breakdown(request: Request) -> dict[str, Any]:
 
     # Load agents snapshot for role/task_id mapping
     snapshot = _read_json(runtime_dir / "agents.json", {"agents": []})
-    tasks_by_id = {task.id: task for task in store.list_tasks()}
+    tasks_by_id = _tasks_by_id(request, store)
 
     session_info: dict[str, dict[str, Any]] = {}
     for raw in cast(_CAST_LIST_DICT_STR_ANY, snapshot.get("agents", [])):

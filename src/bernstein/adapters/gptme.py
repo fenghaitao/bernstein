@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 # Map Bernstein short model names to gptme model identifiers.
 # gptme accepts provider-prefixed names (e.g. "anthropic/claude-sonnet-4-6",
 # "openai/gpt-5.5"). Unknown names pass through unchanged.
-# Last verified against upstream gptme 0.27.x on 2026-05-05 — install: `pipx install gptme`.
+# Last verified against upstream gptme 0.27.x on 2026-05-05 - install: `pipx install gptme`.
 _MODEL_MAP: dict[str, str] = {
     "opus": "anthropic/claude-opus-4-7",
     "opus-4-6": "anthropic/claude-opus-4-6",
@@ -54,6 +54,7 @@ class GptmeAdapter(CLIAdapter):
         task_scope: str = "medium",
         budget_multiplier: float = 1.0,
         system_addendum: str = "",
+        multimodal_context: Any | None = None,
     ) -> SpawnResult:
         """Launch a gptme CLI session.
 
@@ -76,6 +77,7 @@ class GptmeAdapter(CLIAdapter):
             RuntimeError: If the ``gptme`` binary is missing from PATH or
                 cannot be executed.
         """
+        self.refuse_multimodal_if_needed(multimodal_context)
         log_path = workdir / ".sdd" / "runtime" / f"{session_id}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
 

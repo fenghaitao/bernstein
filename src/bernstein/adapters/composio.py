@@ -19,7 +19,7 @@ class ComposioAdapter(CLIAdapter):
 
     This adapter wraps Composio's ``@aoagents/ao`` as a single Bernstein
     agent. The wrapped orchestrator runs its own internal multi-agent
-    workflow inside a tmux session — Bernstein only observes the final
+    workflow inside a tmux session - Bernstein only observes the final
     exit code and the captured log output. This is leaf-node delegation,
     not deep meta-orchestration: the cost, quality gates, and routing
     decisions made by Composio's sub-agents are not visible to
@@ -44,6 +44,7 @@ class ComposioAdapter(CLIAdapter):
         task_scope: str = "medium",
         budget_multiplier: float = 1.0,
         system_addendum: str = "",
+        multimodal_context: Any | None = None,
     ) -> SpawnResult:
         """Launch a Composio Agent Orchestrator session.
 
@@ -68,6 +69,7 @@ class ComposioAdapter(CLIAdapter):
             RuntimeError: If the ``ao`` binary is missing from PATH or
                 cannot be executed.
         """
+        self.refuse_multimodal_if_needed(multimodal_context)
         log_path = workdir / ".sdd" / "runtime" / f"{session_id}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
 

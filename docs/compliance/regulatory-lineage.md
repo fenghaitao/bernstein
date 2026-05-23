@@ -74,7 +74,7 @@ tuning:
 ## Customer-key signature
 
 The signature covers the canonical bytes returned by
-`canonical_record_bytes(record)` — sorted-key UTF-8 JSON without
+`canonical_record_bytes(record)` - sorted-key UTF-8 JSON without
 whitespace, with `customer_signature` excluded (a signer cannot sign
 its own output). Verification is independent of Bernstein's HMAC
 chain: a customer auditor with only the public key and the WAL files
@@ -110,6 +110,24 @@ Any HSM / TPM / KMS-backed signer can be implemented to satisfy this
 protocol and injected into `LineageWriter(..., signer=...)`. The
 file-key reference implementation ships in core; HSM / KMS adapters
 are operator-provided.
+
+#### `kms_adapter: hsm` requires a real integration
+
+Setting `lineage.customer_signing.kms_adapter: hsm` in `bernstein.yaml`
+does **not** ship a working PKCS#11 / Cloud-KMS client. The base
+`HSMKMSAdapter` in `bernstein.core.security.lineage_kms` is a
+documentation stub: every `sign()` call raises `NotImplementedError`.
+To use the `hsm` selector in production, ship a subclass that
+overrides both `sign()` and `public_key_jwk()`, import it before the
+orchestrator loads its config, and the dispatcher picks it up
+automatically.
+
+If a subclass is not on the classpath, `kms_adapter_from_config` raises
+`LineageSignerError` at config-load time -- so a misconfigured
+`bernstein.yaml` surfaces immediately rather than crashing on the first
+audit-emit / lineage-sign call. For non-production smoke tests where
+the silent-stub behaviour is acceptable, set
+`BERNSTEIN_ALLOW_HSM_STUB=1` to opt in to the stub explicitly.
 
 ## Verifying a chain
 
@@ -155,7 +173,7 @@ pass on every cycle. If verification fails the janitor:
 2. Increments `bernstein_lineage_tamper_total{run_id}`.
 3. POSTs to the configured SIEM webhook (if any).
 
-The janitor itself **does not block** on a tamper detection — it
+The janitor itself **does not block** on a tamper detection - it
 records the event and lets the operator decide response policy via
 the SIEM. Webhooks retry with exponential back-off on 5xx and fail
 closed on a broken sink (the janitor never blocks on a bad webhook).
@@ -200,7 +218,7 @@ runs, or for CI gating against the most recent run.
 ## Limitations
 
 - The customer signature covers full record bytes. Edits to any
-  field invalidate the signature — including downstream-derived
+  field invalidate the signature - including downstream-derived
   fields. This is intentional (simpler audit story); customers who
   need finer-grained signing can plug in a custom canonicaliser.
 - Single signing key per run. Rotation across environments is on the
@@ -215,4 +233,4 @@ runs, or for CI gating against the most recent run.
 - Source: `src/bernstein/core/persistence/lineage.py`,
   `lineage_signer.py`, `core/observability/lineage_alert.py`
 - CLI: `src/bernstein/cli/commands/{lineage_cmd,lineage_export_cmd,lineage_verify_cmd}.py`
-- [Artifact lineage trail](../concepts/artifact-lineage.md) — schema reference and chain-walking concepts.
+- [Artifact lineage trail](../concepts/artifact-lineage.md) - schema reference and chain-walking concepts.

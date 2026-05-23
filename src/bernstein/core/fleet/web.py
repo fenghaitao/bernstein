@@ -1,13 +1,13 @@
 """FastAPI web view for the fleet dashboard.
 
 Mounts:
-    * ``GET /``                — minimal HTML fleet table.
-    * ``GET /api/projects``    — JSON snapshots.
-    * ``GET /api/cost``        — fleet cost rollup.
-    * ``GET /api/audit``       — filtered audit entries.
-    * ``GET /api/audit/chain`` — per-project chain status.
-    * ``GET /events``          — SSE proxy of the unified event bus.
-    * ``GET /metrics``         — aggregated Prometheus exposition.
+    * ``GET /``                - minimal HTML fleet table.
+    * ``GET /api/projects``    - JSON snapshots.
+    * ``GET /api/cost``        - fleet cost rollup.
+    * ``GET /api/audit``       - filtered audit entries.
+    * ``GET /api/audit/chain`` - per-project chain status.
+    * ``GET /events``          - SSE proxy of the unified event bus.
+    * ``GET /metrics``         - aggregated Prometheus exposition.
 
 The web view is bound to loopback by default; the ticket explicitly
 defers wider exposure to the existing tunnel wrapper.
@@ -21,7 +21,7 @@ import logging
 import operator
 import time
 from contextlib import suppress
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
@@ -91,7 +91,7 @@ async function refresh() {
     tbody.appendChild(row);
   });
   document.getElementById('footer').textContent =
-    `${data.projects.length} project(s) — fleet 7d: $${cost.fleet_total_usd.toFixed(2)}`;
+    `${data.projects.length} project(s) - fleet 7d: $${cost.fleet_total_usd.toFixed(2)}`;
 }
 
 const events = new EventSource('/events');
@@ -152,13 +152,13 @@ def build_fleet_app(
 
     @app.get("/api/audit")
     async def api_audit(  # pyright: ignore[reportUnusedFunction]
-        project: str | None = Query(default=None),
-        role: str | None = Query(default=None),
-        adapter: str | None = Query(default=None),
-        outcome: str | None = Query(default=None),
-        since: float | None = Query(default=None),
-        until: float | None = Query(default=None),
-        limit: int = Query(default=200, ge=1, le=2000),
+        project: Annotated[str | None, Query()] = None,
+        role: Annotated[str | None, Query()] = None,
+        adapter: Annotated[str | None, Query()] = None,
+        outcome: Annotated[str | None, Query()] = None,
+        since: Annotated[float | None, Query()] = None,
+        until: Annotated[float | None, Query()] = None,
+        limit: Annotated[int, Query(ge=1, le=2000)] = 200,
     ) -> JSONResponse:
         rows: list[dict[str, Any]] = []
         for proj in aggregator.projects():

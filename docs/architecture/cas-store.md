@@ -2,8 +2,8 @@
 
 **Where do duplicated artifact bytes go to die?**
 
-Bernstein stores agent outputs — file dumps, log fragments, structured
-state — in a content-addressable store keyed by the SHA-256 digest of
+Bernstein stores agent outputs - file dumps, log fragments, structured
+state - in a content-addressable store keyed by the SHA-256 digest of
 their bytes. Identical content produces identical keys, so writing the
 same payload twice costs zero extra bytes on disk. The layout is a
 flat-file knock-off of git's object store, living under `.sdd/cas/`.
@@ -29,9 +29,11 @@ new. Properties that follow:
 
 - **Automatic dedup.** Two agents emitting the same artifact share one
   blob.
-- **Tamper evidence.** A digest mismatch on read = corruption, full
-  stop. Pair with a Merkle tree to prove the whole store hasn't been
-  tampered with.
+- **Tamper evidence.** Every `get()` re-hashes the bytes it read and
+  compares them to the requested digest; a mismatch raises
+  `CASIntegrityError` (corruption, full stop) rather than handing back
+  the wrong bytes. Pair with a Merkle tree to prove the whole store
+  hasn't been tampered with.
 - **Cheap snapshots.** A "manifest" (list of digests) is a tiny pointer
   into the blob store; you can move snapshots around without copying
   blob content.
@@ -44,7 +46,7 @@ new. Properties that follow:
 
 The store is a primitive other persistence subsystems can plug into.
 Today the wired-in consumer surface is small (the module is one of the
-"undocumented surprises" surfaced by code-surface inventory) — `CASStore`
+"undocumented surprises" surfaced by code-surface inventory) - `CASStore`
 is constructed against `.sdd/cas/` and exposed for:
 
 1. **Artifact dedup.** Agent outputs that two or more runs would
@@ -61,7 +63,7 @@ is constructed against `.sdd/cas/` and exposed for:
    digests instead of duplicating large files into the snapshot dir.
 
 `bernstein.core.persistence.cas_store` is the only module that touches
-the on-disk layout — every other consumer goes through `put()` /
+the on-disk layout - every other consumer goes through `put()` /
 `get()` / `has()` / `delete()` so the store layout is free to evolve.
 
 ---
@@ -84,7 +86,7 @@ the on-disk layout — every other consumer goes through `put()` /
 Sharded by the **first two hex characters** of the digest
 (`_shard_dir` at `cas_store.py:114-116`) so no single directory holds
 millions of files. With a uniform SHA-256 distribution that's 256
-possible shards — plenty of headroom.
+possible shards - plenty of headroom.
 
 Each blob has a JSON sidecar (`<digest>.meta.json`) containing the
 `CASEntry` fields:
@@ -128,8 +130,13 @@ Public methods:
 
 - `put(content, content_type, metadata)` → digest. No-op if digest
   already exists (`_dedup_saves` counter increments).
-- `get(digest)` → bytes or `None`. Validates the digest format first to
-  prevent path traversal (`_validate_digest`).
+- `get(digest, *, verify=True)` → bytes or `None`. Validates the digest
+  format first to prevent path traversal (`_validate_digest`), then
+  re-hashes the stored bytes and raises `CASIntegrityError` if they do
+  not match the requested digest. A missing blob still returns `None`.
+  Pass `verify=False` only on hot paths that have already verified the
+  content upstream - the opt-out re-opens the integrity hole for that
+  call and must be used deliberately.
 - `has(digest)` → bool.
 - `delete(digest)` → bool. Removes blob + sidecar; cleans up empty
   shard directories.
@@ -140,9 +147,9 @@ Public methods:
 
 Convenience helpers in the same module:
 
-- `put_file(store, path, metadata)` — read a file, guess `content_type`
+- `put_file(store, path, metadata)` - read a file, guess `content_type`
   from the suffix, store with `source_file` in metadata.
-- `put_text(store, text, metadata)` — UTF-8 encode, store as
+- `put_text(store, text, metadata)` - UTF-8 encode, store as
   `text/plain`.
 
 Digest validation is regex-based (`_HEX_RE = r"\A[0-9a-f]{64}\Z"`) so
@@ -210,7 +217,7 @@ the discrepancy.
 - See [`state-persistence.md`](state-persistence.md) for the full
   `.sdd/` layout and where CAS sits relative to WAL, audit logs, and
   the backlog. The `state-persistence` doc lists CAS as one of the
-  "durable" surfaces — meaning it survives a restart and you should
+  "durable" surfaces - meaning it survives a restart and you should
   *not* gitignore it if you depend on artifact dedup across runs.
 
 - See [`warm-pool.md`](warm-pool.md) for the orthogonal optimisation

@@ -25,8 +25,10 @@ locally without waiting for the cloud runner.
 | **syrupy** (snapshot)       | JSONL/audit/lineage wire-format drift                             | PR                  |
 | **Pyright strict zone**     | Untyped/implicit-Any leakage in `core/security/`, `core/protocols/cluster/` | PR                  |
 | **Vulture**                 | Dead code (unused functions/classes/vars at confidence ≥80)       | PR                  |
-| **diff-cover**              | <80% coverage on lines this PR changed                            | PR (advisory)       |
+| **diff-cover** (LEVEL 1)    | Changed lines below the committed diff-coverage floor             | PR (advisory)       |
+| **coverage ratchet** (LEVEL 2) | Total coverage dropped below the committed high-water mark      | push to main (advisory) |
 | **import-linter**           | Architecture-contract violations (cross-package imports)          | PR                  |
+| **No-network guard**        | Unit tests that open a real outbound connection (flaky by design) | PR (every unit run) |
 | **ruff** + **typos**        | Lint, format drift, common typos                                  | PR                  |
 
 ## Run any of the above locally
@@ -35,7 +37,7 @@ locally without waiting for the cloud runner.
 # Property suite (smoke)
 HYPOTHESIS_PROFILE=smoke uv run pytest tests/property/ -q --no-cov
 
-# Property suite (deep — same as nightly)
+# Property suite (deep - same as nightly)
 HYPOTHESIS_PROFILE=deep uv run pytest tests/property/ -q --no-cov
 
 # Snapshot tests
@@ -43,12 +45,12 @@ uv run pytest tests/snapshot/ -q --no-cov
 # Update snapshots after an intentional schema change:
 uv run pytest tests/snapshot/ -q --no-cov --snapshot-update
 
-# Schemathesis (smoke — only the critical-surface allow-list)
+# Schemathesis (smoke - only the critical-surface allow-list)
 BERNSTEIN_AUTH_DISABLED=1 SCHEMATHESIS_PROFILE=smoke \
   uv run pytest tests/contract/ -q --no-cov
 
 # Semgrep (project rules; ERROR severity is the PR gate).
-# Install once via `uv tool install semgrep` — semgrep's transitive
+# Install once via `uv tool install semgrep` - semgrep's transitive
 # pins (click<8.2, opentelemetry-sdk<1.26) conflict with our project
 # floors, so it lives in its own venv outside `uv sync`.
 uv tool install semgrep
@@ -60,7 +62,7 @@ uv run bandit -r src/ -ll --severity-level high -b .bandit-baseline.json
 # pip-audit
 uv run pip-audit --strict
 
-# Beartype claw — runs the focused unit tests under runtime type
+# Beartype claw - runs the focused unit tests under runtime type
 # enforcement on core.security + core.agents + core.protocols.cluster
 BEARTYPE_USE_CLAW=enable \
   uv run pytest tests/unit/ -q --no-cov \
@@ -74,9 +76,18 @@ uv run pyright --typecheckingmode strict \
 # Vulture
 vulture src/ vulture_whitelist.py --min-confidence 80 --exclude tests,docs
 
-# Diff-cover (after a coverage run)
+# Diff-cover (after a coverage run). The floor is the committed
+# diff_coverage_floor_percent in .coverage-baseline.json (LEVEL 1 of the
+# coverage ratchet); the weekly bump nudges it up. See
+# docs/operations/coverage-ratchet.md.
 uv run pytest tests/unit/ --cov=src/bernstein --cov-report=xml
-uv run diff-cover coverage.xml --compare-branch=origin/main --fail-under=80
+FLOOR=$(uv run python scripts/coverage_ratchet.py show-floor --baseline .coverage-baseline.json)
+uv run diff-cover coverage.xml --compare-branch=origin/main --fail-under="$FLOOR"
+
+# Total-coverage ratchet (LEVEL 2): compare a coverage.xml total to the
+# committed high-water mark without writing unless it rose.
+uv run python scripts/coverage_ratchet.py check \
+  --coverage-xml coverage.xml --baseline .coverage-baseline.json --no-bump
 ```
 
 ## When a tool fires on you
@@ -99,7 +110,7 @@ regression case, fix the bug, and the patch becomes a permanent unit
 test.
 
 ### Schemathesis 5xx leak
-A real bug — an endpoint should never propagate an unhandled
+A real bug - an endpoint should never propagate an unhandled
 exception. The reproducer is printed at the bottom of the failure (a
 `curl` invocation against the mounted ASGI app).
 
@@ -130,7 +141,7 @@ not a merge blocker.
 Reproduce locally:
 
 ```bash
-# All modules (slow — budgets sum to about an hour).
+# All modules (slow - budgets sum to about an hour).
 uv run python scripts/mutmut_critical.py
 
 # One module:
@@ -143,6 +154,132 @@ Adding a module to the gate: extend `MODULES` in
 `.github/workflows/mutation-fixed.yml`, and add the source/test
 paths to the `paths:` filter on the same workflow.
 
+## Hermetic unit tests (no network)
+
+Unit tests are hermetic: a test under `tests/unit/` must not open a real
+outbound network connection. A test that talks to a remote host passes only
+while that host answers and fails intermittently otherwise (a transient 404, a
+DNS hiccup, a rate limit), turning a green suite red for reasons unrelated to
+the change under test. One such test (a signed-catalog install whose fixture
+pointed at a `github://` URL) once reached a live host, 404'd intermittently in
+CI, and wedged the merge queue.
+
+### The guard
+
+`tests/unit/conftest.py` installs an **autouse** fixture that wraps
+`socket.socket.connect` / `socket.socket.connect_ex` for every unit test (logic
+in `tests/unit/_no_network.py`). Any attempt to connect to a non-loopback
+address raises immediately:
+
+```
+RuntimeError: unit tests must not touch the network: blocked connection to
+api.example.com:443. Mock it (see docs/contributing/testing.md), or move a
+genuine integration test to tests/integration/.
+```
+
+Because the patch sits at the socket layer, it covers every higher-level client
+(`http.client`, `urllib`, `requests`, `httpx`, raw sockets) without per-library
+patching. It is hand-rolled rather than a third-party plugin so it adds no
+dependency to vet, lock, and audit, and so it integrates with the suite's
+existing strict-marker opt-out convention.
+
+**Loopback stays allowed.** Connections to `127.0.0.0/8`, `::1`, and the
+literal hostname `localhost`, plus Unix-domain sockets, pass through untouched,
+so the many unit tests that spin a local mock server keep working. The guard
+inspects the literal target before any name resolution, so a loopback hostname
+is allowed without an egress; a non-loopback hostname is blocked at the
+resolution boundary.
+
+The scope is `tests/unit/` only. Integration tests (`tests/integration/`)
+run real servers and are not guarded, because their conftest does not install
+the fixture.
+
+### When the guard fires on you
+
+The test under `tests/unit/` opened a real connection. Two correct fixes, in
+order of preference:
+
+1. **Make it hermetic (almost always the right answer).** Mock the network at
+   the seam: inject a fake client, patch the transport, or use the
+   `respx`/`TestClient` patterns already in the suite. Do **not** "fix" it by
+   pointing the call at a loopback URL unless the test genuinely runs a local
+   server.
+2. **Move a genuine integration test to `tests/integration/`.** If the test
+   truly must reach the network, it is not a unit test; relocate it. The guard
+   does not apply there.
+
+### Opting a single test out (rare)
+
+For the rare case where a test must stay under `tests/unit/` and reach the
+network, mark it and document why:
+
+```python
+import pytest
+
+
+@pytest.mark.allow_network  # justification: probes the real X endpoint; see #NNNN
+def test_live_thing() -> None:
+    ...
+```
+
+The marker is registered in `pyproject.toml` (`--strict-markers` is on, so an
+unregistered marker is itself an error). Prefer relocation to
+`tests/integration/` over the marker: a network-touching test in the unit suite
+is a flake waiting to happen.
+
+### Reproduce locally
+
+```bash
+# Full unit suite with the guard active (per-file isolated runner):
+uv run python scripts/run_tests.py --parallel 4
+
+# Or straight pytest:
+uv run pytest tests/unit/ -q --no-cov
+
+# The guard's own meta-tests:
+uv run pytest tests/unit/test_no_network_guard.py -q --no-cov
+```
+
+## Multi-adapter pentest fan-out
+
+The `security-pentest` eval scenario supports a fan-out entry point
+that runs the same fixture through N adapters in parallel and reports
+the per-adapter and aggregate consensus precision/recall split:
+
+```python
+from bernstein.eval.pentest_runner import (
+    load_scenario_config,
+    mock_adapter,
+    run_multi_adapter,
+)
+from bernstein.eval.pentest_scorer import PentestScorer
+
+config = load_scenario_config(Path("eval/scenarios/security_pentest.yaml"))
+report = run_multi_adapter(
+    adapters={"alpha": mock_adapter, "beta": mock_adapter},
+    config=config,
+)
+split = PentestScorer().score_multi(report)
+print(split.per_adapter["alpha"].precision, split.per_adapter["alpha"].recall)
+print(split.consensus.precision, split.consensus.recall)
+```
+
+The CLI exposes the same surface:
+
+```bash
+bernstein eval scenario security-pentest --adapters mock,mock
+```
+
+Determinism contract: the per-adapter call order is recorded on the
+report (`call_order`) and the consensus list is sorted on the dedup
+key `(canonical_vuln_type, normalized_path)`, never on adapter
+completion order. Two runs over the same input therefore produce
+byte-identical output.
+
+Degenerate case: passing a single adapter to `run_multi_adapter`
+produces a per-adapter result that matches the legacy `run_scenario`
+output exactly - existing scripts keep working unchanged.
+
 ## CI cost budget
 
 PR-time CI must stay under 2× the pre-2026 baseline. Heavy work
@@ -154,3 +291,43 @@ block tomorrow's PRs.
 The added PR-time jobs target ≤8 min wall-clock each and run in
 parallel after the lint job clears (so a typo PR fails fast in <2
 min without burning compute on the heavy stack).
+
+## Sharded unit suite
+
+`scripts/run_tests.py` runs each `tests/unit/test_*.py` file in its own
+subprocess (the OOM-avoidance model: a single `pytest --cov` over all
+files in one process exceeds the 7 GB runner ceiling). Each subprocess
+pays a fixed ~2.7 s of Python startup + full-package import regardless
+of how many tests the file holds, so at ~1.4k files a single runner
+spent most of its wall time on startup churn rather than test
+execution.
+
+The `Test` job therefore fans the file list out across parallel
+runners with `--shard i/N`:
+
+```
+# Run only shard 1 of 4 (a deterministic, disjoint quarter of the files):
+uv run python scripts/run_tests.py --shard 1/4
+
+# Compose with the affected-only selection used on PRs:
+uv run python scripts/run_tests.py --shard 1/4 --affected origin/main
+```
+
+The partition is **position-modulo over the sorted file list**: shard
+`i` owns every file whose index `j` satisfies `j % N == i - 1`. That
+makes it deterministic and stable (a failing shard reruns the identical
+slice), complete and disjoint (the union of all `N` shards is exactly
+the full list, no file runs twice), and balanced (shard sizes differ by
+at most one). An empty shard (when `N` exceeds the file count) is a
+legitimate no-op that exits 0.
+
+In CI the `ubuntu`/`windows` `Test` cells fan out across a `shard`
+matrix dimension; the rolled-up `needs.test.result` the `CI gate`
+aggregator reads is `failure` if *any* shard cell fails, so every shard
+is still required. Coverage / JUnit / Codecov upload runs on shard 1
+only (its own file loop still covers every file, so the pin
+deduplicates without narrowing coverage). The `macos` cell keeps a
+single literal job name (branch-protection required-context); it runs a
+deterministic `--shard 1/4` subset on push and the affected slice on
+PRs, with `ci-macos-nightly.yml` running the full macOS matrix daily as
+the safety net.

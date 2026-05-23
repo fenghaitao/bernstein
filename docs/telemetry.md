@@ -1,9 +1,10 @@
 # Opt-in operator observability
 
 Bernstein ships with no telemetry enabled.  An operator may opt in to a
-strictly bounded event set so that the project can measure activation
-funnels (install -> first run -> second run within 7 days).  This
-document is the full schema, opt-out matrix, and retention policy.
+strictly bounded event set so the project can surface crash and error
+reports that would otherwise only reach maintainers via manual bug
+reports.  This document is the full schema, opt-out matrix, and
+retention policy.
 
 ## TL;DR
 
@@ -88,7 +89,10 @@ contents, args, prompts, paths, or resource names.
 ## Network behaviour
 
 - Endpoint: configurable via `BERNSTEIN_TELEMETRY_ENDPOINT`.  Default is
-  a Bernstein-owned receiver.
+  an illustrative placeholder host, not a real receiver.
+- Maintainer-share endpoint: configurable via
+  `BERNSTEIN_TELEMETRY_SHARE_ENDPOINT`.  No default is shipped, and
+  `bernstein telemetry status` prints only whether it is configured.
 - Single HTTP POST per event, 3-second timeout, no retries.
 - All errors are swallowed.  The command always completes normally
   whether or not the POST succeeded.
@@ -108,7 +112,7 @@ The first time `bernstein` runs, a one-time notice is printed to stderr:
 
 ```
 Bernstein collects no telemetry by default.
-Run `bernstein telemetry on` to opt in and help us prioritize.
+Run `bernstein telemetry on` to opt in.
 This message will not appear again.
 ```
 

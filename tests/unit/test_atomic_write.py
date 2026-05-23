@@ -3,17 +3,18 @@
 These tests cover the crash-safe persistence contract:
 
 * Repeated writes to the same path never produce a corrupt or empty
-  reader view — the file is either old-content or new-content at any
+  reader view - the file is either old-content or new-content at any
   observation point.
 * A simulated mid-write crash (exception between temp creation and
   ``os.replace``) cleans up the stray ``.tmp.*`` file and leaves the
   pre-existing target intact.
-* Concurrent writers never expose a partial payload to readers —
+* Concurrent writers never expose a partial payload to readers -
   every successful read returns a fully-parseable JSON document.
 """
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import threading
@@ -27,6 +28,9 @@ from bernstein.core.persistence.atomic_write import (
     write_atomic_json,
     write_atomic_text,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+ATOMIC_WRITE_PATH = Path("src/bernstein/core/persistence/atomic_write.py")
 
 
 def test_atomic_write_bytes_creates_file(tmp_path: Path) -> None:
@@ -121,6 +125,25 @@ def test_atomic_write_crash_during_write_cleans_tmp(tmp_path: Path) -> None:
     assert os.fsync is original_fsync
 
 
+def test_atomic_write_has_no_redundant_catch_and_rethrow() -> None:
+    """Atomic write cleanup handlers should do work before rethrowing."""
+    source = (REPO_ROOT / ATOMIC_WRITE_PATH).read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(ATOMIC_WRITE_PATH))
+
+    redundant_handlers = [
+        handler
+        for handler in ast.walk(tree)
+        if isinstance(handler, ast.ExceptHandler)
+        and isinstance(handler.type, ast.Name)
+        and handler.type.id == "BaseException"
+        and len(handler.body) == 1
+        and isinstance(handler.body[0], ast.Raise)
+        and handler.body[0].exc is None
+    ]
+
+    assert not redundant_handlers
+
+
 def test_atomic_write_tmp_path_unique_per_call(tmp_path: Path) -> None:
     """Two concurrent writers must use distinct temp names to avoid collision."""
     target = tmp_path / "state.json"
@@ -146,7 +169,7 @@ def test_atomic_write_tmp_path_unique_per_call(tmp_path: Path) -> None:
 
 def test_atomic_write_reads_during_concurrent_writes_see_old_or_new(tmp_path: Path) -> None:
     """Readers running while another thread repeatedly overwrites the target
-    must always see a fully-parseable JSON document — never a partial/torn
+    must always see a fully-parseable JSON document - never a partial/torn
     write. ``os.replace`` guarantees this atomicity; this test pins the
     behaviour against regressions that reintroduce plain ``write_text``.
     """
@@ -197,7 +220,7 @@ def test_atomic_write_reads_during_concurrent_writes_see_old_or_new(tmp_path: Pa
         r.join(timeout=5)
 
     assert errors == [], f"concurrent access produced torn reads: {errors}"
-    # We should have observed many distinct versions — proves the reader/writer
+    # We should have observed many distinct versions - proves the reader/writer
     # actually interleaved.
     assert len(observed_versions) >= 5
 

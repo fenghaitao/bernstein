@@ -582,7 +582,7 @@ def doctor(ctx: click.Context, as_json: bool, auto_fix: bool, suggest_docs: bool
     exit_code = 0
     try:
         ctx.invoke(_doctor_impl, as_json=as_json, auto_fix=auto_fix)
-    except SystemExit as exc:
+    except SystemExit as exc:  # NOSONAR python:S5754 - captured to add a hint, re-raised below
         exit_code = int(exc.code or 0)
 
     if not as_json:
@@ -712,7 +712,7 @@ def doctor_scoping_cmd(ctx: click.Context, agent_id: str, role: str) -> None:
     parent = ctx.obj if isinstance(ctx.obj, dict) else {}
     as_json = bool(parent.get("as_json", False))
 
-    # Resolve without installing — doctor must not mutate process state.
+    # Resolve without installing - doctor must not mutate process state.
     policy = resolve_default_policy(workdir=Path.cwd(), install=False)
     inherited = [k for k in os.environ if "API" in k or "TOKEN" in k or "KEY" in k]
     snapshot = explain_policy_for_agent(
@@ -959,6 +959,106 @@ from bernstein.cli.commands.doctor.glitchtip import (  # noqa: E402
 )
 
 _register_doctor_glitchtip(doctor)
+
+
+@doctor.command("sonar-sweep")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Print the would-be ticket paths without writing files.",
+)
+@click.option(
+    "--severity-min",
+    "severity_min",
+    default="MAJOR",
+    show_default=True,
+    type=click.Choice(["BLOCKER", "CRITICAL", "MAJOR", "MINOR", "INFO"]),
+    help="Minimum severity to include.",
+)
+@click.option(
+    "--max-per-day",
+    "max_per_day",
+    type=int,
+    default=25,
+    show_default=True,
+    help="Cap on the number of tickets emitted in this run.",
+)
+@click.option(
+    "--out-dir",
+    "out_dir",
+    default=".sdd/backlog/open",
+    show_default=True,
+    help="Directory to write emitted ticket files into.",
+)
+@click.option(
+    "--create-gh-issues",
+    "create_gh_issues",
+    is_flag=True,
+    default=False,
+    help="For P0+P1 tickets (BLOCKER, CRITICAL, MAJOR), also open a GH issue.",
+)
+@click.option(
+    "--fixture",
+    default=None,
+    help="Use a saved JSON fixture instead of calling Sonar (for local dry-runs).",
+)
+def doctor_sonar_sweep_cmd(
+    dry_run: bool,
+    severity_min: str,
+    max_per_day: int,
+    out_dir: str,
+    create_gh_issues: bool,
+    fixture: str | None,
+) -> None:
+    """Turn open static-analysis findings into backlog tickets.
+
+    \b
+    Reads ``SONAR_HOST_URL`` and ``SONAR_TOKEN`` from the environment,
+    fetches the open findings, applies de-dup against existing tickets
+    under ``.sdd/backlog/*``, and writes one Markdown ticket per new
+    finding into the configured output directory.
+
+    \b
+    With ``--dry-run`` the command lists the would-be file paths without
+    writing them. With ``--fixture`` it loads findings from a saved JSON
+    blob instead of calling the Sonar API at all -- useful for local
+    smoke tests.
+    """
+    # The sweeper lives under ``scripts/`` so the wheel stays slim. We
+    # import it lazily from the source tree.
+    from pathlib import Path as _Path
+
+    repo_root = _Path(__file__).resolve().parents[4]
+    scripts_dir = repo_root / "scripts"
+    import sys as _sys
+
+    if str(scripts_dir) not in _sys.path:
+        _sys.path.insert(0, str(scripts_dir))
+    try:
+        from sweep_sonar_findings import (
+            main as _sweep_main,  # type: ignore[import-not-found]
+        )
+    except ImportError as exc:
+        click.echo(f"error: cannot import sweeper: {exc}", err=True)
+        raise SystemExit(2) from exc
+
+    argv: list[str] = [
+        "--severity-min",
+        severity_min,
+        "--max-per-day",
+        str(max_per_day),
+        "--out-dir",
+        out_dir,
+    ]
+    if dry_run:
+        argv.append("--dry-run")
+    if create_gh_issues:
+        argv.append("--create-gh-issues")
+    if fixture:
+        argv.extend(["--fixture", fixture])
+
+    raise SystemExit(int(_sweep_main(argv)))
 
 
 # ---------------------------------------------------------------------------
@@ -1296,13 +1396,13 @@ def _replay_list_runs(runs_dir: Path) -> None:
         event_count = sum(1 for line in replay_file.read_text().splitlines() if line.strip())
         size_kb = replay_file.stat().st_size / 1024
         metadata = read_session_replay_metadata(d)
-        started = "—"
-        branch = "—"
-        sha = "—"
+        started = "-"
+        branch = "-"
+        sha = "-"
         if metadata is not None:
             started = dt.datetime.fromtimestamp(metadata.started_at).strftime("%Y-%m-%d %H:%M")
-            branch = metadata.git_branch or "—"
-            sha = metadata.git_sha[:8] if metadata.git_sha else "—"
+            branch = metadata.git_branch or "-"
+            sha = metadata.git_sha[:8] if metadata.git_sha else "-"
         table.add_row(d.name, started, branch, sha, str(event_count), f"{size_kb:.1f} KB")
     console.print(table)
 
@@ -1385,7 +1485,7 @@ def _replay_run_impl(
     model: str | None,
     extra_context: str | None,
 ) -> None:
-    """Body of ``bernstein replay <run_id>`` — replay one run.
+    """Body of ``bernstein replay <run_id>`` - replay one run.
 
     Extracted so the new ``replay`` :class:`click.Group` can dispatch to
     it from its top-level invocation while also exposing subcommands
@@ -1565,6 +1665,11 @@ def replay_cmd(
       bernstein replay latest                     # replay most recent run
       bernstein replay 20240315-143022            # replay a specific run
       bernstein replay diff RUN_A RUN_B           # first-divergence finder
+      bernstein replay <AGENT_ID>                 # per-step journal view (#1799)
+      bernstein replay export <AGENT_ID> -o RECEIPT   # portable receipt (#1799)
+      bernstein replay publish <AGENT_ID> -o RECEIPT  # redacted publish (#1799)
+      bernstein replay verify <RECEIPT>           # offline verifier (#1799)
+      bernstein replay diff-journal A B           # per-step divergence finder
     """
     # ``nargs=-1`` lets us implement the pseudo-subcommand ``diff`` without
     # converting ``replay`` to a full :class:`click.Group` (which would
@@ -1573,12 +1678,36 @@ def replay_cmd(
     if args and args[0] == "diff":
         _replay_diff_dispatch(args[1:], sdd_dir=sdd_dir, as_json=as_json)
         return
+    if args and args[0] in {"export", "publish", "verify", "diff-journal"}:
+        _replay_journal_dispatch(args, sdd_dir=sdd_dir, as_json=as_json)
+        return
 
     if len(args) != 1:
         console.print(
-            "[red]Usage:[/red] bernstein replay <RUN_ID | latest | list> OR bernstein replay diff RUN_A RUN_B",
+            "[red]Usage:[/red] bernstein replay <RUN_ID | AGENT_ID | latest | list> "
+            "OR bernstein replay diff RUN_A RUN_B "
+            "OR bernstein replay export|publish|verify|diff-journal ...",
         )
         raise SystemExit(2)
+
+    # When an agent journal exists for this id, prefer the per-step view
+    # over the run-trace view. The journal directory naming is unambiguous
+    # because it always sits under ``.sdd/runtime/journal/`` (a path the
+    # legacy run recorder never wrote to).
+    sdd_path = Path(sdd_dir)
+    journal_dir = sdd_path / "runtime" / "journal" / args[0]
+    if journal_dir.exists():
+        from bernstein.cli.commands.replay_cmd import replay_agent_view
+
+        rc = replay_agent_view(
+            agent_id=args[0],
+            sdd_dir=sdd_path,
+            as_json=as_json,
+            limit=limit,
+        )
+        if rc != 0:
+            raise SystemExit(rc)
+        return
 
     _replay_run_impl(
         run_id=args[0],
@@ -1588,6 +1717,112 @@ def replay_cmd(
         model=model,
         extra_context=extra_context,
     )
+
+
+def _replay_journal_dispatch(
+    args: list[str],
+    *,
+    sdd_dir: str,
+    as_json: bool,
+) -> None:
+    """Dispatch the new ``export | publish | verify | diff-journal`` verbs.
+
+    These touch only the per-step journal under ``.sdd/runtime/journal/``
+    and never the legacy ``.sdd/runs/`` directory; the run-trace replay
+    flow is unchanged.
+    """
+    verb = args[0]
+    sdd_path = Path(sdd_dir)
+
+    if verb == "export":
+        if len(args) < 2:
+            console.print("[red]Usage:[/red] bernstein replay export <AGENT_ID> [-o OUT]")
+            raise SystemExit(2)
+        agent_id = args[1]
+        # Output path can be passed as the third positional or default beside .sdd.
+        output: Path = Path(args[2]) if len(args) >= 3 else sdd_path / "runtime" / "receipts" / f"{agent_id}.tar"
+
+        from bernstein.cli.commands.replay_cmd import replay_export
+
+        rc = replay_export(
+            agent_id=agent_id,
+            sdd_dir=sdd_path,
+            output=output,
+        )
+        if rc != 0:
+            raise SystemExit(rc)
+        return
+
+    if verb == "publish":
+        # Publish requires an explicit ``--yes`` style sentinel positional so
+        # operators cannot accidentally publish from a script that just adds
+        # a verb name.
+        if len(args) < 2:
+            console.print("[red]Usage:[/red] bernstein replay publish <AGENT_ID> [OUT] --opt-in")
+            raise SystemExit(2)
+        agent_id = args[1]
+        opt_in = "--opt-in" in args
+        positional_tail = [a for a in args[2:] if not a.startswith("--")]
+        output = (
+            Path(positional_tail[0])
+            if positional_tail
+            else sdd_path / "runtime" / "receipts" / f"{agent_id}.redacted.tar"
+        )
+
+        from bernstein.cli.commands.replay_cmd import replay_publish
+
+        rc = replay_publish(
+            agent_id=agent_id,
+            sdd_dir=sdd_path,
+            output=output,
+            opt_in=opt_in,
+        )
+        if rc != 0:
+            raise SystemExit(rc)
+        return
+
+    if verb == "verify":
+        if len(args) < 2:
+            console.print("[red]Usage:[/red] bernstein replay verify <RECEIPT> [--head HEX]")
+            raise SystemExit(2)
+        receipt = Path(args[1])
+        expected_head: str | None = None
+        for i, token in enumerate(args[2:], start=2):
+            if token == "--head" and i + 1 < len(args):
+                expected_head = args[i + 1]
+
+        from bernstein.cli.commands.replay_cmd import replay_verify
+
+        rc = replay_verify(
+            receipt_path=receipt,
+            expected_head=expected_head,
+            public_key_path=None,
+        )
+        if rc != 0:
+            raise SystemExit(rc)
+        return
+
+    if verb == "diff-journal":
+        if len(args) != 3:
+            console.print(
+                "[red]Usage:[/red] bernstein replay diff-journal <LEFT_AGENT_ID> <RIGHT_AGENT_ID>",
+            )
+            raise SystemExit(2)
+
+        from bernstein.cli.commands.replay_cmd import replay_diff_journals
+
+        rc = replay_diff_journals(
+            left_agent_id=args[1],
+            right_agent_id=args[2],
+            sdd_dir=sdd_path,
+            as_json=as_json,
+        )
+        if rc != 0:
+            raise SystemExit(rc)
+        return
+
+    console.print(f"[red]Unknown replay verb:[/red] {verb}")
+    raise SystemExit(2)
 
 
 def _replay_diff_dispatch(

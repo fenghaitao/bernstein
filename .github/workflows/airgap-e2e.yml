@@ -52,7 +52,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: Harden runner (audit mode)
-        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -133,7 +133,7 @@ jobs:
             --skip-project \
             --output dist/airgap-wheelhouse-ci \
             --version 0.0.0-ci
-          # Verify it inside an isolated namespace — proves the verify
+          # Verify it inside an isolated namespace - proves the verify
           # path makes no outbound calls. GitHub-hosted runners ship the
           # ``unshare`` binary but execute as unprivileged users without
           # CAP_SYS_ADMIN, so the syscall returns EPERM. Fall back to

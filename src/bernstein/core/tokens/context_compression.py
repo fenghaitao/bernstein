@@ -96,7 +96,7 @@ class DependencyGraph:
             try:
                 rel_path = fpath.relative_to(self.workdir).as_posix()
                 deps = self._extract_imports_from_file(fpath)
-                file_deps = self._resolve_module_paths(deps, fpath)
+                file_deps = self._resolve_module_paths(deps)
                 self.graph[rel_path] = file_deps
             except Exception as e:
                 logger.debug("Failed to analyze %s: %s", fpath, e)
@@ -111,8 +111,7 @@ class DependencyGraph:
         Returns:
             Module name like ``bernstein.core.spawner``.
         """
-        p = rel.removeprefix("src/").removesuffix(".py").removesuffix("/__init__")
-        return p.replace("/", ".")
+        return rel.removeprefix("src/").removesuffix(".py").removesuffix("/__init__").replace("/", ".")
 
     def _extract_imports_from_file(self, fpath: Path) -> set[str]:
         """Extract imported module names from a Python file via AST.
@@ -137,12 +136,11 @@ class DependencyGraph:
                 imports.add(node.module)
         return imports
 
-    def _resolve_module_paths(self, modules: set[str], source_file: Path) -> list[str]:
+    def _resolve_module_paths(self, modules: set[str]) -> list[str]:
         """Convert module names to relative file paths within workdir.
 
         Args:
             modules: Set of module names from import statements.
-            source_file: The file doing the importing (for context).
 
         Returns:
             List of relative file paths (only those that exist in workdir).
@@ -178,7 +176,6 @@ class DependencyGraph:
             if candidate.is_file():
                 with suppress(ValueError):
                     file_deps.append(candidate.relative_to(self.workdir).as_posix())
-                    continue
 
         return file_deps
 
@@ -532,7 +529,7 @@ class ContextCompressor:
 
 
 # ---------------------------------------------------------------------------
-# Section priority table — higher value = keep under tight budget
+# Section priority table - higher value = keep under tight budget
 # ---------------------------------------------------------------------------
 _SECTION_PRIORITIES: dict[str, int] = {
     "role": 10,

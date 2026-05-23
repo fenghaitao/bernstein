@@ -26,8 +26,9 @@ from bernstein.core.eu_ai_act import (
 )
 from bernstein.core.lifecycle import IllegalTransitionError
 from bernstein.core.role_classifier import classify_role
+from bernstein.core.routes._rate_limit_headers import rate_limit_exception
 
-# Import Pydantic models from server — this works because server.py's
+# Import Pydantic models from server - this works because server.py's
 # __getattr__ defers the `app` creation, so the module body (class defs)
 # loads without triggering create_app().
 from bernstein.core.server import (
@@ -210,7 +211,7 @@ def _try_check_realtime_anomaly(
     """Run real-time anomaly detection on a progress update (best-effort).
 
     Writes a kill-signal file automatically when KILL_AGENT severity is
-    detected; logs warnings for lower-severity signals.  Non-blocking —
+    detected; logs warnings for lower-severity signals.  Non-blocking -
     any exception is caught and logged so the progress route always succeeds.
     """
     if not session_id:
@@ -239,6 +240,8 @@ def _try_check_realtime_anomaly(
                 signal.task_id,
                 signal.message,
             )
+    # intentional-broad-except: best-effort anomaly probe must never break the
+    # progress route; surface modes include AttributeError on partial wiring.
     except Exception:
         from bernstein.core.sanitize import sanitize_log
 
@@ -258,7 +261,7 @@ def _try_attest_task_completion(
 ) -> None:
     """Best-effort Sigstore/Ed25519 attestation for a completed task.
 
-    Non-blocking — logs a warning and continues if attestation fails.
+    Non-blocking - logs a warning and continues if attestation fails.
     """
     import hashlib
 
@@ -289,15 +292,19 @@ def _try_attest_task_completion(
             method,
             record.bundle_path,
         )
+    # intentional-broad-except: attestation is opt-in telemetry (Sigstore HTTP,
+    # Ed25519 key IO, Rekor rate limits); must never break the task route.
     except Exception:
-        logger.warning("Attestation failed for task %s (non-fatal)", task_id, exc_info=True)
+        from bernstein.core.sanitize import sanitize_log
+
+        logger.warning("Attestation failed for task %s (non-fatal)", sanitize_log(task_id), exc_info=True)
 
 
 def _try_generate_sbom(request: Request) -> None:
     """Best-effort SBOM generation triggered after task completion.
 
     Runs only when ``BERNSTEIN_SBOM_ON_COMPLETE=1`` is set in the environment
-    or when ``request.app.state.sbom_on_complete`` is truthy.  Non-blocking —
+    or when ``request.app.state.sbom_on_complete`` is truthy.  Non-blocking -
     any exception is caught and logged so the task completion route always
     succeeds.
 
@@ -326,6 +333,8 @@ def _try_generate_sbom(request: Request) -> None:
             artifact_path,
             len(sbom.components),
         )
+    # intentional-broad-except: SBOM generation shells out to pip/syft and must
+    # never block task completion.
     except Exception:
         logger.warning("SBOM generation failed (non-fatal)", exc_info=True)
 
@@ -357,6 +366,8 @@ def _update_file_health(
 
         tracker = FileHealthTracker(sdd_dir=sdd_dir)
         tracker.record_task_outcome(task_id, owned_files, outcome)
+    # intentional-broad-except: per-file health is optional analytics and must
+    # not propagate to the route.
     except Exception:
         logger.warning("file_health: update failed (non-fatal)", exc_info=True)
 
@@ -414,13 +425,25 @@ async def create_task(body: TaskCreate, request: Request) -> TaskResponse:
             current_count = store.count_by_status(tenant_id=effective_tenant).get("total", 0)
             allowed, reason = tenant_mgr.check_quota(effective_tenant, current_count)
             if not allowed:
-                raise HTTPException(status_code=429, detail=reason)
+                # The tenant quota is a hard cap, not a rolling window.  We
+                # cannot promise a reset epoch, but we can advertise the
+                # bucket capacity (max_tasks) and a remaining budget of zero
+                # so the client back-off is informed.
+                limit_value: int | None = None
+                with suppress(Exception):
+                    ctx = tenant_mgr.get_context(effective_tenant)
+                    limit_value = int(ctx.quota.max_tasks)
+                raise rate_limit_exception(
+                    reason,
+                    limit=limit_value,
+                    remaining=0,
+                )
 
         # Pre-create hook: may block via HookBlockingError (T719)
         try:
             pm = get_plugin_manager()
             pm.fire_pre_task_create(
-                task_id="",  # ID not yet assigned — use empty string
+                task_id="",  # ID not yet assigned - use empty string
                 role=effective_body.role,
                 title=effective_body.title,
                 description=effective_body.description,
@@ -486,7 +509,7 @@ async def create_tasks_batch(body: BatchCreateRequest, request: Request) -> Batc
                 description=effective.description,
             )
         except HookBlockingError:
-            logger.warning("Pre-create hook blocked task '%s' — skipping", effective.title)
+            logger.warning("Pre-create hook blocked task '%s' - skipping", effective.title)
             continue
 
         prepared.append(effective)
@@ -558,7 +581,7 @@ async def self_create_subtask(body: TaskSelfCreate, request: Request) -> TaskRes
 
         # Auto-transition parent to waiting if not already
         if parent.status.value not in ("waiting_for_subtasks", "done", "failed", "closed"):
-            subtask_count = sum(1 for t in store.list_tasks() if t.parent_task_id == body.parent_task_id)
+            subtask_count = store.count_subtasks(body.parent_task_id)
             with suppress(Exception):
                 await store.wait_for_subtasks(body.parent_task_id, subtask_count)
                 sse_bus.publish(
@@ -618,20 +641,15 @@ async def claim_batch(body: BatchClaimRequest, request: Request) -> BatchClaimRe
     with start_span("task.claim_batch", {"agent_id": body.agent_id, "task_count": len(body.task_ids)}):
         store = _get_store(request)
         tenant_id = _resolve_request_tenant_scope(request)
-        authorized_ids: list[str] = []
-        unauthorized_ids: list[str] = []
-        for task_id in body.task_ids:
-            task = store.get_task(task_id)
-            if task is None or task.tenant_id != tenant_id:
-                unauthorized_ids.append(task_id)
-                continue
-            authorized_ids.append(task_id)
+        # Tenant authorization is enforced inside store.claim_batch under
+        # the same lock that performs the claim, so the check cannot be
+        # invalidated by a concurrent delete or tenant rewrite (TOCTOU).
         claimed, failed = await store.claim_batch(
-            authorized_ids,
+            list(body.task_ids),
             body.agent_id,
             claimed_by_session=body.claimed_by_session,
+            tenant_id=tenant_id,
         )
-        failed.extend(unauthorized_ids)
         return BatchClaimResponse(claimed=claimed, failed=failed)
 
 
@@ -688,7 +706,7 @@ async def claim_task(
     responses={
         404: {"description": "Task not found"},
         409: {"description": "Invalid state transition"},
-        422: {"description": "Empty result_summary — task auto-failed"},
+        422: {"description": "Empty result_summary - task auto-failed"},
     },
 )
 async def complete_task(task_id: str, body: TaskCompleteRequest, request: Request) -> TaskResponse:
@@ -855,7 +873,7 @@ async def cancel_task(task_id: str, body: TaskCancelRequest, request: Request) -
         if existing_task is None:
             raise KeyError
         _require_task_access(existing_task, request)
-        # Preserve the legacy 409 for a root task that is already terminal —
+        # Preserve the legacy 409 for a root task that is already terminal -
         # ``cancel_cascade`` silently skips terminal tasks, so we check here.
         cancellable = {
             "open",
@@ -950,7 +968,7 @@ async def progress_task(task_id: str, body: TaskProgressRequest, request: Reques
     _store_progress_snapshot(store, task_id, body)
     _persist_lines_if_present(request, task, body)
 
-    # Real-time behavior anomaly detection — checks file access, commands,
+    # Real-time behavior anomaly detection - checks file access, commands,
     # network endpoints, output size, and file-change velocity against learned
     # baselines.  Kill signals are written automatically for KILL_AGENT severity.
     _try_check_realtime_anomaly(
@@ -1063,9 +1081,7 @@ def get_partial_merge_state(task_id: str, request: Request) -> PartialMergeRespo
     """
     from bernstein.core.incremental_merge import get_incremental_merge_state
 
-    store = _get_store(request)
-
-    task = store.get_task(task_id)
+    task = _get_store(request).get_task(task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
     _require_task_access(task, request)
@@ -1117,7 +1133,14 @@ def get_task_snapshots(task_id: str, request: Request) -> list[SnapshotEntry]:
     ]
 
 
-@router.get("/tasks", responses=_TENANT_RESPONSES)
+# Maximum number of tasks returned in a single GET /tasks response.
+# Applies to both the paginated envelope and the legacy flat-list shape:
+# the legacy path silently truncates to this cap and emits a deprecation
+# header so callers can migrate to explicit pagination without an outage.
+_LIST_TASKS_HARD_CAP = 500
+
+
+@router.get("/tasks", response_model=None, responses=_TENANT_RESPONSES)
 def list_tasks(
     request: Request,
     status: str | None = None,
@@ -1127,12 +1150,14 @@ def list_tasks(
     parent_session_id: str | None = None,
     limit: int | None = None,
     offset: int | None = None,
-) -> PaginatedTasksResponse | list[TaskResponse]:
+) -> PaginatedTasksResponse | JSONResponse:
     """List tasks, optionally filtered by status, cell_id, and/or claim owner.
 
     When ``limit`` or ``offset`` query params are provided the response is a
     paginated envelope (``{tasks, total, limit, offset}``).  Without them,
-    the legacy flat list is returned for backward compatibility.
+    the legacy flat list is returned for backward compatibility, capped at
+    ``_LIST_TASKS_HARD_CAP`` items and accompanied by a ``Deprecation``
+    header asking callers to pass explicit pagination.
 
     Args:
         request: FastAPI request.
@@ -1147,7 +1172,8 @@ def list_tasks(
             when present.
 
     Returns:
-        Paginated response **or** plain list of TaskResponse dicts.
+        Paginated response **or** plain list of TaskResponse dicts (capped
+        at ``_LIST_TASKS_HARD_CAP``).
     """
     store = _get_store(request)
     effective_tenant = _resolve_request_tenant_scope(request, tenant)
@@ -1161,7 +1187,7 @@ def list_tasks(
 
     paginate = limit is not None or offset is not None
     if paginate:
-        effective_limit = max(1, min(limit or 100, 500))
+        effective_limit = max(1, min(limit or 100, _LIST_TASKS_HARD_CAP))
         effective_offset = max(0, offset or 0)
         total = len(all_tasks)
         page = all_tasks[effective_offset : effective_offset + effective_limit]
@@ -1172,8 +1198,25 @@ def list_tasks(
             offset=effective_offset,
         )
 
-    # Legacy: return a flat list for callers that don't pass pagination params.
-    return [task_to_response(t) for t in all_tasks]
+    # Legacy: return a flat list capped at _LIST_TASKS_HARD_CAP for callers
+    # that have not yet migrated to explicit pagination.  We always emit a
+    # Deprecation header; when truncation occurs we also expose the true
+    # total via X-Total-Count so clients can detect the cap and page.
+    total = len(all_tasks)
+    page = all_tasks[:_LIST_TASKS_HARD_CAP]
+    body = [task_to_response(t).model_dump(mode="json") for t in page]
+    headers = {
+        "Deprecation": "true",
+        "Link": '</tasks?limit=500&offset=0>; rel="successor-version"',
+        "X-Total-Count": str(total),
+    }
+    if total > _LIST_TASKS_HARD_CAP:
+        headers["Warning"] = (
+            f'299 - "GET /tasks without limit/offset is capped at '
+            f"{_LIST_TASKS_HARD_CAP}; pass limit/offset to page through "
+            f'{total} tasks"'
+        )
+    return JSONResponse(content=body, headers=headers)
 
 
 @router.get("/tasks/counts", responses=_TENANT_RESPONSES)
@@ -1191,8 +1234,8 @@ def task_counts(
     counts = store.count_by_status(tenant_id=effective_tenant)
     # Expose every TaskStatus value so the GUI can render real numbers for
     # closed / in_progress / planned / pending_approval / waiting_for_subtasks
-    # / orphaned instead of falling back to ``—``.  Missing keys default to 0
-    # — back-compat for the six original buckets is preserved.
+    # / orphaned instead of falling back to ``-``.  Missing keys default to 0
+    # - back-compat for the six original buckets is preserved.
     return TaskCountsResponse(
         open=counts.get("open", 0),
         claimed=counts.get("claimed", 0),
@@ -1260,7 +1303,7 @@ def get_task_graph_neighbors(task_id: str, request: Request) -> dict[str, Any]:
 
     Powers the dashboard Deps tab: upstream tasks the requested one waits
     on (its ``depends_on`` list) and downstream tasks that declare it as a
-    dependency.  Depth is intentionally fixed at 1 — the panel renders two
+    dependency.  Depth is intentionally fixed at 1 - the panel renders two
     flat lists, not a transitive graph.
     """
     store = _get_store(request)
@@ -1288,7 +1331,7 @@ def get_task_graph_neighbors(task_id: str, request: Request) -> dict[str, Any]:
         seen_up.add(dep_id)
         dep = by_id.get(dep_id)
         if dep is None:
-            # Missing dep — surface the ID so the operator can see the gap
+            # Missing dep - surface the ID so the operator can see the gap
             # without a hard 404.
             upstream.append({"id": dep_id, "title": None, "status": "missing", "role": None})
         else:
@@ -1347,7 +1390,7 @@ def get_task_gates(task_id: str, request: Request) -> JSONResponse:
 
 @router.patch("/tasks/{task_id}", responses={404: {"description": "Task not found"}})
 async def patch_task(task_id: str, body: TaskPatchRequest, request: Request) -> TaskResponse:
-    """Update mutable task fields (role, priority, model) — manager corrections.
+    """Update mutable task fields (role, priority, model) - manager corrections.
 
     Used by the manager agent or dashboard to correct mis-assigned tasks,
     adjust priority, or change model without interrupting the orchestrator.

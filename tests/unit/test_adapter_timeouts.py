@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 # Helpers
 # ---------------------------------------------------------------------------
 
-_SHORT_TIMEOUT = 0.05  # seconds — fire almost immediately
+_SHORT_TIMEOUT = 0.05  # seconds - fire almost immediately
 
 
 def _make_popen_mock(pid: int) -> MagicMock:
@@ -53,7 +53,7 @@ def _make_llm_settings_mock() -> MagicMock:
 
 
 # ---------------------------------------------------------------------------
-# Core watchdog logic — tested via CodexAdapter as representative
+# Core watchdog logic - tested via CodexAdapter as representative
 # ---------------------------------------------------------------------------
 
 
@@ -204,7 +204,15 @@ class TestAllAdaptersHaveTimeout:
         self._assert_has_timer(CursorAdapter, "bernstein.adapters.cursor.subprocess.Popen", tmp_path)
 
     def test_gemini_has_timer(self, tmp_path: Path) -> None:
-        self._assert_has_timer(GeminiAdapter, "bernstein.adapters.gemini.subprocess.Popen", tmp_path)
+        # GeminiAdapter discovers the binary via shutil.which at spawn time
+        # (dual-binary cascade for the 2026-06-18 transition). Pin the
+        # resolver here so the test passes on a CI runner that has neither
+        # ``antigravity`` nor ``gemini`` installed.
+        with patch(
+            "bernstein.adapters.gemini.shutil.which",
+            side_effect=lambda name: f"/usr/local/bin/{name}" if name in {"antigravity", "gemini"} else None,
+        ):
+            self._assert_has_timer(GeminiAdapter, "bernstein.adapters.gemini.subprocess.Popen", tmp_path)
 
     def test_generic_has_timer(self, tmp_path: Path) -> None:
         self._assert_has_timer(
@@ -239,7 +247,7 @@ class TestAllAdaptersHaveTimeout:
 
 class TestDefaultTimeout:
     def test_default_timeout_1800(self, tmp_path: Path) -> None:
-        """Watchdog fires after default 1800 s — verified by checking timer interval."""
+        """Watchdog fires after default 1800 s - verified by checking timer interval."""
         import threading
 
         adapter = CodexAdapter()

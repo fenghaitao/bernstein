@@ -22,7 +22,7 @@ provider-specific endpoint.
 
 Last verified against https://junie.jetbrains.com/ and the upstream
 repository https://github.com/jetbrains-junie/junie on 2026-05-06.
-The CLI flag set is still in beta — if the public surface drifts,
+The CLI flag set is still in beta - if the public surface drifts,
 update :data:`_HEADLESS_FLAG` / :data:`_PROMPT_FILE_FLAG` here and the
 matching assertions in ``tests/unit/test_adapter_junie.py``.
 """
@@ -73,7 +73,7 @@ _PROVIDER_ENV_KEYS: dict[str, str] = {
 
 # Provider-host map for the network-policy allow-list. Falls back to
 # the empty tuple (no remote allow-listing) when the routed provider is
-# unknown — the policy then defers to the global default.
+# unknown - the policy then defers to the global default.
 _PROVIDER_ENDPOINTS: dict[str, tuple[tuple[str, int], ...]] = {
     "anthropic": (("api.anthropic.com", 443),),
     "openai": (("api.openai.com", 443),),
@@ -85,7 +85,7 @@ _PROVIDER_ENDPOINTS: dict[str, tuple[tuple[str, int], ...]] = {
     "mistral": (("api.mistral.ai", 443),),
 }
 
-# JetBrains Account / Junie API key — always forwarded so the binary
+# JetBrains Account / Junie API key - always forwarded so the binary
 # can resolve account-level entitlements regardless of routed provider.
 _JUNIE_ACCOUNT_KEY = "JUNIE_API_KEY"
 # Provider-routing override read directly by the binary.
@@ -101,7 +101,7 @@ class JunieAdapter(CLIAdapter):
     Bernstein's network policy matches whichever upstream API the
     routed model dials.
 
-    The adapter raises only at :meth:`spawn` time — importing this
+    The adapter raises only at :meth:`spawn` time - importing this
     module never touches the env, so missing credentials surface as a
     runtime warning when an actual task is dispatched.
     """
@@ -124,22 +124,23 @@ class JunieAdapter(CLIAdapter):
         task_scope: str = "medium",
         budget_multiplier: float = 1.0,
         system_addendum: str = "",
+        multimodal_context: Any | None = None,
     ) -> SpawnResult:
         """Launch a one-shot Junie headless session.
 
         Args:
-            prompt: Task prompt — written to a per-session file and
+            prompt: Task prompt - written to a per-session file and
                 passed to Junie via ``--prompt-file``.
             workdir: Working directory; Junie treats this as the
                 project root.
             model_config: Bernstein model selection.  ``model`` is
                 forwarded via ``--model``; ``provider`` (when set on a
                 future ``ModelConfig`` revision) drives provider-
-                specific env routing — until then we fall back to
+                specific env routing - until then we fall back to
                 ``$JUNIE_PROVIDER``.
             session_id: Unique session identifier used for log naming
                 and the bernstein-worker title.
-            mcp_config: Optional MCP server definitions (unused —
+            mcp_config: Optional MCP server definitions (unused -
                 Junie has its own MCP wiring).
             timeout_seconds: Process wall-clock timeout.
             task_scope: Task scope hint (unused by Junie).
@@ -155,6 +156,7 @@ class JunieAdapter(CLIAdapter):
             RuntimeError: The ``junie`` binary is missing from PATH or
                 the OS denies execution.
         """
+        self.refuse_multimodal_if_needed(multimodal_context)
         provider = self._resolve_provider(model_config)
         # Bind external endpoints for the network policy check based on
         # the routed provider; class-level remains empty so this is the
@@ -182,7 +184,7 @@ class JunieAdapter(CLIAdapter):
         if not os.environ.get(_JUNIE_ACCOUNT_KEY) and not (provider_key and os.environ.get(provider_key)):
             logger.warning(
                 "JunieAdapter: neither %s nor the routed provider key (%s) is set "
-                "and no JetBrains Account OAuth cache has been confirmed — "
+                "and no JetBrains Account OAuth cache has been confirmed - "
                 "spawn may fail with an authentication error.",
                 _JUNIE_ACCOUNT_KEY,
                 provider_key or "<unknown provider>",
@@ -262,7 +264,7 @@ class JunieAdapter(CLIAdapter):
              (a future ``ModelConfig`` revision will surface this).
           2. ``$JUNIE_PROVIDER`` env var (matches the binary's own
              override mechanism).
-          3. Empty string when nothing is configured — caller falls
+          3. Empty string when nothing is configured - caller falls
              back to provider-agnostic env routing.
 
         Returns:

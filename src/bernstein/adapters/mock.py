@@ -68,6 +68,7 @@ class MockAgentAdapter(CLIAdapter):
         task_scope: str = "medium",
         budget_multiplier: float = 1.0,
         system_addendum: str = "",
+        multimodal_context: Any | None = None,
     ) -> SpawnResult:
         """Spawn a mock agent subprocess that applies demo changes.
 
@@ -82,6 +83,7 @@ class MockAgentAdapter(CLIAdapter):
             SpawnResult with mock process PID and log path.
         """
         # Create log file
+        self.refuse_multimodal_if_needed(multimodal_context)
         log_path = workdir / ".sdd" / "runtime" / f"agent-{session_id}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -274,9 +276,9 @@ def fix_broken_test(workdir: Path, log_path: Path) -> None:
         write_log(log_path, "⚠ tests/test_app.py not found")
         return
     content = test_file.read_text()
-    if "assert resp.status_code == 404  # wrong — should be 200" in content:
+    if "assert resp.status_code == 404  # wrong - should be 200" in content:
         content = content.replace(
-            "assert resp.status_code == 404  # wrong — should be 200",
+            "assert resp.status_code == 404  # wrong - should be 200",
             "assert resp.status_code == 200",
         )
         # Also remove the BUG 4 docstring annotation
@@ -315,15 +317,16 @@ def _idle_mode(log_path: Path) -> None:
             write_log(log_path, f"idle: WARN bad {key}={raw!r}; using default {default}")
             return default
 
-    def _float_env(key: str, default: float) -> float:
+    def _float_env(key: str, default: float, *, invalid_default: float | None = None) -> float:
         raw = os.environ.get(key, "").strip()
         if not raw:
             return default
         try:
             return float(raw)
         except ValueError:
-            write_log(log_path, f"idle: WARN bad {key}={raw!r}; using default {default}")
-            return default
+            fallback = default if invalid_default is None else invalid_default
+            write_log(log_path, f"idle: WARN bad {key}={raw!r}; using default {fallback}")
+            return fallback
 
     lo = _int_env("BERNSTEIN_MOCK_IDLE_MIN_S", 15)
     hi = _int_env("BERNSTEIN_MOCK_IDLE_MAX_S", 120)
@@ -332,7 +335,7 @@ def _idle_mode(log_path: Path) -> None:
     hi = max(0, hi)
     if hi < lo:
         lo, hi = hi, lo
-    fail_rate = _float_env("BERNSTEIN_MOCK_FAIL_RATE", 0.05)
+    fail_rate = _float_env("BERNSTEIN_MOCK_FAIL_RATE", 0.05, invalid_default=0.0)
     will_fail = random.random() < fail_rate
     sleep_s = random.randint(lo, hi) if hi > 0 else 0
 
@@ -344,7 +347,7 @@ def _idle_mode(log_path: Path) -> None:
         elapsed += chunk
         write_log(log_path, f"idle: heartbeat {elapsed}/{sleep_s}s")
     if will_fail:
-        write_log(log_path, "idle: simulated failure — exiting non-zero")
+        write_log(log_path, "idle: simulated failure - exiting non-zero")
         sys.exit(1)
     write_log(log_path, "idle: completed")
 
@@ -360,7 +363,7 @@ def main():
 
     write_log(log_path, f"Mock agent started for task: {task_name}")
 
-    # Idle mode: GUI dev path — `bernstein run --idle` sets BERNSTEIN_MOCK_IDLE=1
+    # Idle mode: GUI dev path - `bernstein run --idle` sets BERNSTEIN_MOCK_IDLE=1
     # so each spawned mock just sleeps + emits heartbeat lines instead of doing fixes.
     if os.environ.get("BERNSTEIN_MOCK_IDLE") == "1":
         _idle_mode(log_path)
@@ -378,7 +381,7 @@ def main():
     elif task_name == "broken_test":
         fix_broken_test(workdir, log_path)
     else:
-        write_log(log_path, f"Unknown task type: {task_name} — no-op")
+        write_log(log_path, f"Unknown task type: {task_name} - no-op")
 
     time.sleep(0.5)
     write_log(log_path, "Mock agent completed successfully")

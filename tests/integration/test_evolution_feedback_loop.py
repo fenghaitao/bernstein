@@ -10,13 +10,14 @@ Full pipeline:
   7. ApprovalGate logs decisions to decisions.jsonl
   8. Approved proposals queued or applied (history.jsonl)
 
-No real LLM calls — ProposalGenerator and analysis pipeline are fully deterministic.
+No real LLM calls - ProposalGenerator and analysis pipeline are fully deterministic.
 """
 
 from __future__ import annotations
 
 import json
 import time
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
@@ -35,6 +36,8 @@ from bernstein.evolution.types import UpgradeProposal as EvolutionUpgradeProposa
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from pytest import MonkeyPatch
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -125,6 +128,17 @@ def _make_orchestrator(
     )
 
 
+def _force_slow_phase_every_tick(monkeypatch: MonkeyPatch) -> None:
+    """Make slow-phase work run on every tick for these focused integration tests."""
+    from bernstein.core.orchestration import orchestrator as orchestrator_module
+
+    monkeypatch.setattr(
+        orchestrator_module,
+        "ORCHESTRATOR",
+        replace(orchestrator_module.ORCHESTRATOR, slow_tick_phase=1),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -143,7 +157,7 @@ class TestEvolutionFeedbackLoop:
 
         coordinator = EvolutionCoordinator(state_dir=state_dir)
 
-        # Simulate 20 task completions (75 % pass rate — below 80 % threshold)
+        # Simulate 20 task completions (75 % pass rate - below 80 % threshold)
         for i in range(20):
             task = MagicMock()
             task.id = f"synthetic-{i}"
@@ -269,8 +283,13 @@ class TestEvolutionFeedbackLoop:
         for pid in routed_ids:
             assert pid in logged, f"No decision logged for proposal {pid}"
 
-    def test_orchestrator_tick_triggers_evolution_and_writes_pending_json(self, tmp_path: Path) -> None:
+    def test_orchestrator_tick_triggers_evolution_and_writes_pending_json(
+        self,
+        tmp_path: Path,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
         """Tick with evolution_tick_interval=1 fires the cycle and writes pending.json."""
+        _force_slow_phase_every_tick(monkeypatch)
         state_dir = tmp_path / ".sdd"
         state_dir.mkdir()
 
@@ -315,8 +334,13 @@ class TestEvolutionFeedbackLoop:
             assert "title" in entry
             assert "status" in entry
 
-    def test_orchestrator_tick_interval_controls_when_cycle_fires(self, tmp_path: Path) -> None:
+    def test_orchestrator_tick_interval_controls_when_cycle_fires(
+        self,
+        tmp_path: Path,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
         """Evolution cycle fires only when tick_count % interval == 0."""
+        _force_slow_phase_every_tick(monkeypatch)
         state_dir = tmp_path / ".sdd"
         state_dir.mkdir()
 
@@ -342,8 +366,8 @@ class TestEvolutionFeedbackLoop:
             )
 
             # Ticks 1 and 2 should NOT fire the cycle
-            orchestrator.tick()  # tick 1 — no cycle
-            orchestrator.tick()  # tick 2 — no cycle
+            orchestrator.tick()  # tick 1 - no cycle
+            orchestrator.tick()  # tick 2 - no cycle
 
             # Pending proposals should not yet exist (cycle hasn't run)
             pending_path = state_dir / "upgrades" / "pending.json"
@@ -360,8 +384,9 @@ class TestEvolutionFeedbackLoop:
         data = json.loads(pending_path.read_text())
         assert len(data) > 0, "Cycle on tick 3 must produce proposals"
 
-    def test_full_feedback_loop(self, tmp_path: Path) -> None:
+    def test_full_feedback_loop(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
         """Complete integration: task completions → metrics → evolution → proposals → pending."""
+        _force_slow_phase_every_tick(monkeypatch)
         state_dir = tmp_path / ".sdd"
         state_dir.mkdir()
 

@@ -1,14 +1,12 @@
-"""Tests for context compression engine — DependencyGraph, BM25Ranker, ContextCompressor."""
+"""Tests for context compression engine - DependencyGraph, BM25Ranker, ContextCompressor."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import ast
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 # --- Fixtures ---
 
@@ -119,6 +117,24 @@ class TestDependencyGraph:
         models_path = "src/myapp/models.py"
         dependents = graph.dependents_of(models_path)
         assert len(dependents) >= 1
+
+    def test_src_subdirectory_resolution_has_no_redundant_terminal_continue(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        source_path = repo_root / "src" / "bernstein" / "core" / "tokens" / "context_compression.py"
+        module = ast.parse(source_path.read_text(encoding="utf-8"))
+        dependency_graph = next(
+            node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "DependencyGraph"
+        )
+        resolve_method = next(
+            node
+            for node in dependency_graph.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_resolve_module_paths"
+        )
+        modules_loop = next(node for node in ast.walk(resolve_method) if isinstance(node, ast.For))
+        src_pattern_branch = modules_loop.body[-1]
+
+        assert isinstance(src_pattern_branch, ast.If)
+        assert not any(isinstance(node, ast.Continue) for node in ast.walk(src_pattern_branch))
 
 
 # --- TestBM25Ranker ---
@@ -261,8 +277,8 @@ class TestPromptCompressor:
         from bernstein.core.context_compression import PromptCompressor
 
         # Budget of 100 tokens (~400 chars).
-        # specialists section is 300 chars (75 tokens) — should be dropped.
-        # role + tasks are essential (priority 10) — must be kept.
+        # specialists section is 300 chars (75 tokens) - should be dropped.
+        # role + tasks are essential (priority 10) - must be kept.
         compressor = PromptCompressor(token_budget=100)
         sections = [
             ("role", "You are a specialist. " * 5),  # ~110 chars, 27 tokens
@@ -285,8 +301,8 @@ class TestPromptCompressor:
             ("tasks", "t" * 200),  # 50 tokens
             ("instructions", "i" * 200),  # 50 tokens
             ("signal", "s" * 200),  # 50 tokens
-            ("specialists", "a" * 400),  # 100 tokens — droppable
-            ("lessons", "l" * 400),  # 100 tokens — droppable
+            ("specialists", "a" * 400),  # 100 tokens - droppable
+            ("lessons", "l" * 400),  # 100 tokens - droppable
         ]
         _compressed, _orig, _compressed_tok, dropped = compressor.compress_sections(sections)
 
@@ -326,13 +342,13 @@ class TestPromptCompressor:
     def test_achieves_30_percent_reduction_on_bloated_prompt(self) -> None:
         from bernstein.core.context_compression import PromptCompressor
 
-        # Budget set to 50% of a large prompt — simulates small-task target.
+        # Budget set to 50% of a large prompt - simulates small-task target.
         role_content = "You are a backend engineer." * 50  # ~1350 chars
         tasks_content = "Implement feature X." * 20  # ~400 chars
         instructions_content = "Mark complete when done." * 20  # ~480 chars
-        specialists_content = "Available: " + "agentX " * 200  # ~1400 chars — droppable
-        lessons_content = "Lesson: do X not Y. " * 100  # ~2000 chars — droppable
-        team_content = "Team: agentA working on Y. " * 100  # ~2700 chars — droppable
+        specialists_content = "Available: " + "agentX " * 200  # ~1400 chars - droppable
+        lessons_content = "Lesson: do X not Y. " * 100  # ~2000 chars - droppable
+        team_content = "Team: agentA working on Y. " * 100  # ~2700 chars - droppable
 
         total_chars = sum(
             len(c)

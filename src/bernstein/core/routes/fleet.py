@@ -1,7 +1,7 @@
 """Fleet aggregator stub for the operator UI.
 
 The Bernstein fleet dashboard (``bernstein fleet --web``) is a separate
-FastAPI application served on its own port — see
+FastAPI application served on its own port - see
 :mod:`bernstein.core.fleet.web`. The operator UI ("/ui") talks to the
 *single-project* task server, which historically had no fleet endpoints.
 
@@ -24,7 +24,7 @@ client-side change.
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import APIRouter, Query, Request
 
@@ -87,8 +87,8 @@ def fleet_projects(request: Request) -> dict[str, Any]:
 @router.get("/fleet/search")
 def fleet_search(
     request: Request,
-    q: str = Query(default="", description="Cross-project search query"),
-    limit: int = Query(default=50, ge=1, le=500),
+    q: Annotated[str, Query(description="Cross-project search query")] = "",
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
 ) -> dict[str, Any]:
     """Cross-project search stub for the topbar search bar.
 

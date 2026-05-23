@@ -18,6 +18,7 @@ zero we return ``None`` for the forecast so dashboards can render
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -76,7 +77,7 @@ class EnvelopeRollupRow:
         """Return the equivalent live :class:`EnvelopeReport`.
 
         Useful for dashboard tiles that already render
-        :class:`EnvelopeReport` from the live tracker — the rollup row
+        :class:`EnvelopeReport` from the live tracker - the rollup row
         carries the same fields when driven from a historical ledger.
         """
         remaining = max(self.cap - self.total_spend, 0.0) if self.cap > 0 else float("inf")
@@ -165,7 +166,7 @@ def rollup(
             bucket.models.add(rec.model)
         ts = rec.timestamp
         if ts > 0:
-            if bucket.first_ts == 0.0 or ts < bucket.first_ts:
+            if bucket.first_ts < 0.0 or math.isclose(bucket.first_ts, 0.0, abs_tol=1e-12) or ts < bucket.first_ts:
                 bucket.first_ts = ts
             if ts > bucket.last_ts:
                 bucket.last_ts = ts

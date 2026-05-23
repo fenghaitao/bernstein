@@ -1,8 +1,8 @@
 """Abstract TaskStore base class for pluggable storage backends.
 
 Concrete implementations:
-- TaskStore (server.py) — in-memory with JSONL persistence, zero dependencies.
-- PostgresTaskStore (store_postgres.py) — asyncpg + optional Redis locking.
+- TaskStore (server.py) - in-memory with JSONL persistence, zero dependencies.
+- PostgresTaskStore (store_postgres.py) - asyncpg + optional Redis locking.
 """
 
 from __future__ import annotations
@@ -123,6 +123,7 @@ class BaseTaskStore(ABC):
         task_ids: list[str],
         agent_id: str,
         agent_role: str | None = None,
+        tenant_id: str | None = None,
     ) -> tuple[list[str], list[str]]:
         """Atomically claim multiple tasks by ID with optional role matching.
 
@@ -131,10 +132,14 @@ class BaseTaskStore(ABC):
             agent_id: Claiming agent's identifier.
             agent_role: If set, only tasks whose role matches the agent's role
                 can be claimed.
+            tenant_id: If set, tasks must belong to this tenant scope.
+                The check happens atomically with the claim so it cannot be
+                invalidated by a concurrent delete or tenant rewrite.
 
         Returns:
-            ``(claimed_ids, failed_ids)`` — tasks not in ``OPEN`` status or
-            with mismatched roles are reported in *failed_ids*.
+            ``(claimed_ids, failed_ids)`` -- tasks not in ``OPEN`` status,
+            outside the tenant scope, or with mismatched roles are reported
+            in *failed_ids*.
         """
 
     @abstractmethod
@@ -190,7 +195,7 @@ class BaseTaskStore(ABC):
 
     @abstractmethod
     async def update(self, task_id: str, role: str | None, priority: int | None) -> Task:
-        """Update mutable task fields (role, priority) — manager corrections.
+        """Update mutable task fields (role, priority) - manager corrections.
 
         Only open or failed tasks should be reassigned; claimed tasks are left
         to finish before the new assignment takes effect.

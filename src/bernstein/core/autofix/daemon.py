@@ -2,13 +2,13 @@
 
 The daemon module exposes four operations:
 
-* :func:`start` — fork a long-running poller that walks each
+* :func:`start` - fork a long-running poller that walks each
   configured repo every ``poll_interval_seconds``.
-* :func:`stop` — read the pid file under ``.sdd/runtime/autofix.pid``,
+* :func:`stop` - read the pid file under ``.sdd/runtime/autofix.pid``,
   send ``SIGTERM`` and wait for clean exit.
-* :func:`status` — return a typed :class:`DaemonStatus` describing
+* :func:`status` - return a typed :class:`DaemonStatus` describing
   whether the daemon is running and, if so, when it last ticked.
-* :func:`attach` — open the live status feed produced by the
+* :func:`attach` - open the live status feed produced by the
   running daemon (a JSONL tail) so an operator can watch attempts
   scroll by without checking GitHub.
 
@@ -40,6 +40,8 @@ from bernstein.core.autofix.ladder import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from bernstein.core.autofix.config import AutofixConfig, RepoConfig
     from bernstein.core.autofix.dispatcher import Dispatcher
 
@@ -168,7 +170,7 @@ def _process_alive(pid: int) -> bool:
 def append_status(workdir: Path, record: AttemptRecord) -> None:
     """Append one attempt record as JSONL into the daemon status log.
 
-    The log is plain JSONL — each line is a serialised
+    The log is plain JSONL - each line is a serialised
     :class:`AttemptRecord` so ``attach`` can stream it without
     parsing extra framing.
 
@@ -222,7 +224,7 @@ def read_status(workdir: Path) -> DaemonStatus:
             last_tick = log_path.stat().st_mtime
 
     if pid > 0 and not _process_alive(pid):
-        # Stale pid file — surface "not running" so callers can clean
+        # Stale pid file - surface "not running" so callers can clean
         # up rather than reporting a zombie as alive.
         return DaemonStatus(
             running=False,
@@ -243,6 +245,31 @@ def read_status(workdir: Path) -> DaemonStatus:
 # ---------------------------------------------------------------------------
 # Tick loop
 # ---------------------------------------------------------------------------
+
+
+def _capture_autofix_fault(
+    exc: BaseException,
+    *,
+    stage: str,
+    repo: str,
+    pr_number: int | None = None,
+) -> None:
+    """Forward an unexpected autofix-daemon fault to the operator error sink.
+
+    A repo source or dispatch that raises is an unexpected daemon fault,
+    not a handled CI outcome, so it belongs in GlitchTip. The capture
+    helper is fail-closed, and the call is wrapped so the daemon's own
+    resilience (it logs and continues) is never compromised by telemetry.
+    """
+    try:
+        from bernstein.core.observability import error_capture
+
+        tags = {"stage": stage, "repo": repo}
+        if pr_number is not None:
+            tags["pr_number"] = str(pr_number)
+        error_capture.capture_exception(exc, category="autofix", tags=tags)
+    except Exception as cap_exc:  # pragma: no cover - defensive
+        logger.debug("autofix telemetry capture skipped (%s): %s", stage, cap_exc)
 
 
 def tick_once(
@@ -282,8 +309,9 @@ def tick_once(
             continue
         try:
             candidates = failing_source(repo_config)
-        except Exception:
+        except Exception as exc:
             logger.exception("autofix: failing-source raised for repo %s", repo_config.name)
+            _capture_autofix_fault(exc, stage="failing_source", repo=repo_config.name)
             continue
 
         for candidate in candidates:
@@ -303,11 +331,17 @@ def tick_once(
                     log=log,
                     session_id=candidate.session_id,
                 )
-            except Exception:
+            except Exception as exc:
                 logger.exception(
                     "autofix: dispatch raised for %s#%s",
                     pr.repo,
                     pr.number,
+                )
+                _capture_autofix_fault(
+                    exc,
+                    stage="dispatch",
+                    repo=pr.repo,
+                    pr_number=pr.number,
                 )
                 continue
 
@@ -411,8 +445,8 @@ def start(
     failing_source: FailingPRSource,
     workdir: Path,
     extra_repo_filter: set[str] | None = None,
-    sleep_fn: object = time.sleep,
-    now_fn: object = time.time,
+    sleep_fn: Callable[[float], object] = time.sleep,
+    now_fn: Callable[[], float] = time.time,
     iterations: int | None = None,
 ) -> int:
     """Run the daemon's main loop in the *current* process.
@@ -433,7 +467,7 @@ def start(
         now_fn: Callable matching :func:`time.time`.  Tests inject
             a fixed clock.
         iterations: When set, the loop runs exactly that many ticks
-            then returns.  ``None`` means "run forever" — the
+            then returns.  ``None`` means "run forever" - the
             production behaviour.
 
     Returns:
@@ -460,12 +494,10 @@ def start(
             ticks += 1
             if iterations is not None and ticks >= iterations:
                 break
-            assert callable(sleep_fn)
             sleep_fn(config.poll_interval_seconds)
     finally:
         _clear_pid(workdir)
-    # Touch ``now_fn`` so type-checkers do not flag it as unused.
-    assert callable(now_fn)
+    _ = now_fn
     return ticks
 
 
@@ -509,7 +541,7 @@ def _clear_pid(workdir: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# attach() — read recent attempts from the JSONL status log
+# attach() - read recent attempts from the JSONL status log
 # ---------------------------------------------------------------------------
 
 

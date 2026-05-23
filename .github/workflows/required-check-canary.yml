@@ -1,11 +1,9 @@
 name: Required-check name canary
 
-# Branch protection on `main` requires a single context named `CI gate`,
-# emitted by the `ci-gate` job in `.github/workflows/ci.yml`. If a future
-# refactor renames the job key, edits its `name:`, or adds a second job
-# that also produces a `CI gate` check, the required-context rule
-# silently weakens -- GitHub treats an unknown required-context name as
-# pass-through, so PRs would merge without the rolled-up gate signal.
+# Branch protection on `main` requires `CI gate` and `review-bot-ack`.
+# This workflow verifies the in-tree `CI gate` emitters. The scheduled
+# branch-protection audit reads `BRANCH_PROTECTION_CONTEXTS_JSON` below
+# and compares it with live repository settings.
 #
 # This canary fails the PR (and the weekly scheduled run) if any of the
 # locked invariants drifts. It is intentionally narrow: it does not try
@@ -52,7 +50,7 @@ jobs:
       contents: read
     steps:
       - name: Harden runner (audit mode)
-        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
 
@@ -63,6 +61,7 @@ jobs:
       - name: Verify required-check invariants
         env:
           REQUIRED_CONTEXT: "CI gate"
+          BRANCH_PROTECTION_CONTEXTS_JSON: '["CI gate","review-bot-ack"]'
           REQUIRED_JOB_KEY: "ci-gate"
           MACOS_JOB_KEY: "test-macos"
           MACOS_JOB_NAME: "Test (macos-latest, Python 3.13)"

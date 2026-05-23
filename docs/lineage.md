@@ -1,4 +1,4 @@
-# Lineage v1 — user reference
+# Lineage v1 - user reference
 
 Lineage v1 is Bernstein's per-artefact transparency log. Every agent write
 to a tracked file produces an append-only, content-addressed, Ed25519-signed
@@ -15,7 +15,7 @@ This page is the **user-facing** reference. For the design rationale see
 | Where does it live? | `.sdd/lineage/log.jsonl` (append-only) + per-entry detached JWS sidecars. |
 | Who signs? | The agent itself, with an Ed25519 key issued at spawn time. |
 | Who verifies? | Anyone with `bernstein-verify` (a standalone PyPI wheel). No Bernstein install required. |
-| What gets shipped to auditors? | `bernstein compliance pack` — a single self-contained ZIP. |
+| What gets shipped to auditors? | `bernstein compliance pack` - a single self-contained ZIP. |
 
 ## Quickstart
 
@@ -105,7 +105,7 @@ Sub-commands:
 | `bernstein-verify chain <path> --lineage-dir DIR` | Single artefact chain. |
 | `bernstein-verify forks <path> --lineage-dir DIR` | Report unresolved forks (CI use). |
 
-The verifier is air-gap-safe — no network calls, no remote registry
+The verifier is air-gap-safe - no network calls, no remote registry
 lookups. Every public key it needs is in `agent-cards/` inside the pack.
 
 ## Article 12 paragraph mapping reference
@@ -154,12 +154,38 @@ make -C examples/lineage demo-eu-mfg
 |---|---|---|
 | `bernstein-verify pack` exits 1 with "fork detected" | Two agents wrote the same artefact in parallel without a Steward merge. | Run `bernstein lineage merge <path>` to record a merge entry; re-pack. |
 | `verify` exits 1 with "invalid signature" | The log was edited after the fact, or the Agent Card was swapped. | Treat as a security incident; do not ship the pack. |
+| `verify` exits 1 with "kid binding cannot be established" | No Agent Card on disk matches the `(agent_id, agent_card_kid)` the entry signed - typically a card for the entry's key id is missing after a rotation. | Restore the card for that key id under the per-kid layout (see [Key rotation](#key-rotation)); re-verify. |
+| `verify` exits 1 with "kid binding mismatch" | An entry's signed body names one key id while its JWS header names another - a key-substitution attempt. | Treat as a security incident; do not ship the pack. |
 | `verify` exits 1 with "HMAC mismatch" | Operator HMAC key rotated mid-window. | Re-pack with the correct key context; consult ADR-009 §6. |
-| Genesis entry shows up with `parent_hashes: []` | First-time write of a file that existed before lineage was enabled. | Expected — see ADR-009 §11 on bootstrap. |
+| `bernstein lineage gate` reports "non-canonical line bytes" | A `log.jsonl` line's raw bytes differ from the canonical form the writer emits - reordered keys, inserted whitespace, or a stray `\r`. A generic JSONL tool or a hand-edit that pretty-printed or reformatted the log triggers this even when the field values are unchanged. The gate binds verification to the on-disk bytes, so a non-canonical rewrite is rejected rather than silently re-canonicalised. | The log is the provenance anchor and is never edited in place by Bernstein. Restore `log.jsonl` from a trusted copy and re-run; if no trusted copy exists, treat as a tamper incident. |
+| `bernstein lineage gate` reports "missing trailing newline" | The final record was truncated or its terminating `\n` was stripped/flipped at EOF (e.g. an editor that drops the trailing newline, or a partial write). | Restore the full log from a trusted copy; a truncated final record is tamper-evidence. |
+| Genesis entry shows up with `parent_hashes: []` | First-time write of a file that existed before lineage was enabled. | Expected - see ADR-009 §11 on bootstrap. |
+
+## Key rotation
+
+Each lineage entry signs the key id (`agent_card_kid`) it was produced under, and the gate verifies the signature against the Agent Card for that exact `(agent_id, kid)` pair - not against whatever card currently sits at the agent id. This keeps historical entries verifiable after an agent rotates its key.
+
+The gate reads two on-disk Agent Card layouts:
+
+| Layout | Path | Use |
+|---|---|---|
+| Single-card | `<cards-dir>/<agent-id>/card.json` | One key per agent (default). |
+| Per-kid | `<cards-dir>/<agent-id>/<kid>/card.json` | Multiple historical keys for one agent, one card per key id. |
+
+To rotate a key without invalidating prior entries, keep the old card and add the new one under the per-kid layout:
+
+```
+.sdd/agents/
+  agent:claude-worker-3/
+    k-2025-01/card.json   # old key - retained so old entries still verify
+    k-2025-06/card.json   # new key - signs entries from the rotation onward
+```
+
+Entries signed under `k-2025-01` continue to verify against the retained card; new entries under `k-2025-06` verify against the new one. Removing a card for a key id that historical entries still reference makes those entries fail the gate with a kid-binding error.
 
 ## See also
 
-- [ADR-009: Lineage v1](decisions/009-lineage-v1.md) — design rationale, schema, threat model.
-- [Compliance — EU AI Act Article 12 bundle](compliance/eu-ai-act-article-12-bundle.md) — the bundle format detail.
-- [Regulatory lineage export](compliance/lineage-export.md) — operator export guide.
+- [ADR-009: Lineage v1](decisions/009-lineage-v1.md) - design rationale, schema, threat model.
+- [Compliance - EU AI Act Article 12 bundle](compliance/eu-ai-act-article-12-bundle.md) - the bundle format detail.
+- [Regulatory lineage export](compliance/lineage-export.md) - operator export guide.
 - A2A v1.0 Agent Card spec; RFC 7515 JWS; RFC 8785 JCS.

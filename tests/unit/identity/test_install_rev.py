@@ -3,16 +3,20 @@
 Covers:
 
 * token shape (16 lowercase base32 chars, no padding)
-* deterministic output for fixed (seed, nonce, version) — the install-
+* deterministic output for fixed (seed, nonce, version) - the install-
   stability promise
 * kill-switch behaviours (env var, module flag, missing seed)
 * verifier shape-check + sentinel rejection
 * full nonce-aware verifier with constant-time compare
-* nonce persistence — same install → same token across calls
+* nonce persistence - same install → same token across calls
 """
 
 from __future__ import annotations
 
+import ast
+import inspect
+import textwrap
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 
 import pytest
@@ -49,6 +53,26 @@ TEST_NONCE = bytes.fromhex("0123456789abcdef0123")
 assert len(TEST_NONCE) == NONCE_BYTES
 
 
+def _exception_names(node: ast.expr | None) -> set[str]:
+    if node is None:
+        return set()
+    if isinstance(node, ast.Name):
+        return {node.id}
+    if isinstance(node, ast.Tuple):
+        names: set[str] = set()
+        for item in node.elts:
+            names.update(_exception_names(item))
+        return names
+    return set()
+
+
+_KNOWN_EXCEPTION_TYPES = {
+    "ImportError": ImportError,
+    "ModuleNotFoundError": ModuleNotFoundError,
+    "PackageNotFoundError": PackageNotFoundError,
+}
+
+
 @pytest.fixture(autouse=True)
 def _reset_state(
     monkeypatch: pytest.MonkeyPatch,
@@ -71,7 +95,7 @@ def _reset_state(
 
 
 class TestTokenShape:
-    """Token-shape invariants — must hold for every code path."""
+    """Token-shape invariants - must hold for every code path."""
 
     def test_disabled_sentinel_is_sixteen_zeros(self) -> None:
         assert DISABLED_SENTINEL == "0" * TOKEN_LEN
@@ -145,6 +169,27 @@ class TestTokenShape:
 class TestDeterminism:
     """The install-stability promise: same install → same token."""
 
+    def test_version_byte_handles_package_not_found_before_module_not_found(self) -> None:
+        """PackageNotFoundError must not be shadowed by its base class."""
+        assert issubclass(PackageNotFoundError, ModuleNotFoundError)
+
+        source = textwrap.dedent(inspect.getsource(ir._version_byte))
+        tree = ast.parse(source)
+        function = tree.body[0]
+        assert isinstance(function, ast.FunctionDef)
+
+        for try_node in (node for node in ast.walk(function) if isinstance(node, ast.Try)):
+            earlier: list[type[BaseException]] = []
+            for handler in try_node.handlers:
+                current = [
+                    exc_type
+                    for name in _exception_names(handler.type)
+                    if (exc_type := _KNOWN_EXCEPTION_TYPES.get(name)) is not None
+                ]
+                for exc_type in current:
+                    assert not any(issubclass(exc_type, previous) for previous in earlier)
+                earlier.extend(current)
+
     def test_compute_token_is_deterministic(self) -> None:
         seed = bytes.fromhex(TEST_SEED_HEX)
         a = _compute_token(seed, TEST_NONCE, 1)
@@ -182,7 +227,7 @@ class TestDeterminism:
         token_a = get_install_rev()
 
         # Drop the in-process cache so the next call re-reads the disk
-        # nonce — which is the hot path on cold-start of a new process.
+        # nonce - which is the hot path on cold-start of a new process.
         ir._reset_cache_for_tests()
         token_b = get_install_rev()
 
@@ -199,7 +244,7 @@ class TestDeterminism:
         monkeypatch.setenv(ENV_SEED, TEST_SEED_HEX)
         nonce_path = tmp_path / "install_nonce"
         nonce_path.parent.mkdir(parents=True, exist_ok=True)
-        # Wrong length on disk — should be silently re-minted.
+        # Wrong length on disk - should be silently re-minted.
         nonce_path.write_bytes(b"too-short")
         monkeypatch.setenv(ENV_NONCE_PATH, str(nonce_path))
         ir._reset_cache_for_tests()
@@ -211,7 +256,7 @@ class TestDeterminism:
 
 
 # ---------------------------------------------------------------------------
-# Render helpers — embedding slots
+# Render helpers - embedding slots
 # ---------------------------------------------------------------------------
 
 
@@ -254,7 +299,7 @@ class TestRenderHelpers:
 
 
 class TestVerifier:
-    """Operator-side verifiers — shape, sentinel, full HMAC compare."""
+    """Operator-side verifiers - shape, sentinel, full HMAC compare."""
 
     def test_verify_token_requires_seed(self) -> None:
         with pytest.raises(SeedNotConfiguredError):
@@ -282,7 +327,7 @@ class TestVerifier:
             "",
             "tooshort",
             "WAY-TOO-LONG-TOKEN-FOR-VERIFICATION",
-            "AAAAAAAAAAAAAAAA",  # uppercase — base32 lower only
+            "AAAAAAAAAAAAAAAA",  # uppercase - base32 lower only
             "abcdefghijklmno1",  # contains '1' which is not in base32 alphabet
             "abcdefghijklmno0",  # contains '0' which is not in base32 alphabet
         ],

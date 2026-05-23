@@ -430,7 +430,7 @@ class ConformanceHarness:
                     f"log_path {result.log_path!s} does not end with expected suffix {step.expected_log_suffix!r}"
                 ),
             )
-        return StepResult(step_index=step_index, passed=True, message=f"OK — pid={result.pid}")
+        return StepResult(step_index=step_index, passed=True, message=f"OK - pid={result.pid}")
 
     def replay_step(
         self,
@@ -575,6 +575,9 @@ class {class_name}(CLIAdapter):
         mcp_config: dict[str, Any] | None = None,
         timeout_seconds: int = 1800,
         task_scope: str = "medium",
+        budget_multiplier: float = 1.0,
+        system_addendum: str = "",
+        multimodal_context: Any | None = None,
     ) -> SpawnResult:
         """Launch {cli_name} with the given prompt.
 
@@ -585,10 +588,15 @@ class {class_name}(CLIAdapter):
             session_id: Unique session identifier.
             mcp_config: Optional MCP tool configuration.
             timeout_seconds: Maximum runtime before kill.
+            task_scope: Task scope for adapters that support budget caps.
+            budget_multiplier: Scope budget multiplier.
+            system_addendum: Extra system prompt text for adapters that support it.
+            multimodal_context: Optional multimodal attachments.
 
         Returns:
             SpawnResult with PID and log path.
         """
+        self.refuse_multimodal_if_needed(multimodal_context)
         log_path = workdir / f"{adapter_id}-{{session_id}}.log"
         cmd = ["{cli_command}", "--prompt", prompt]
         proc = subprocess.Popen(
