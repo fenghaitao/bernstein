@@ -1,0 +1,80 @@
+{
+  "summary": {
+    "ok": 0,
+    "warn": 1,
+    "fail": 0,
+    "skipped": 3,
+    "error": 0
+  },
+  "backends": [
+    {
+      "backend": "sonar",
+      "status": "skipped",
+      "detail": "SONAR_HOST_URL or SONAR_TOKEN not set",
+      "error": null,
+      "metrics": []
+    },
+    {
+      "backend": "glitchtip",
+      "status": "skipped",
+      "detail": "BERNSTEIN_GLITCHTIP_TOKEN not set",
+      "error": null,
+      "metrics": []
+    },
+    {
+      "backend": "dt",
+      "status": "skipped",
+      "detail": "DTRACK_URL/TOKEN/PROJECT not set",
+      "error": null,
+      "metrics": []
+    },
+    {
+      "backend": "code-scanning",
+      "status": "warn",
+      "detail": "100 open alert(s)",
+      "error": null,
+      "metrics": [
+        {
+          "name": "open_alerts",
+          "value": "100",
+          "numeric": 100.0,
+          "threshold": "0",
+          "threshold_status": "fail",
+          "delta": "new"
+        },
+        {
+          "name": "critical_alerts",
+          "value": "0",
+          "numeric": 0.0,
+          "threshold": "0",
+          "threshold_status": "ok",
+          "delta": "new"
+        },
+        {
+          "name": "high_alerts",
+          "value": "45",
+          "numeric": 45.0,
+          "threshold": "0",
+          "threshold_status": "fail",
+          "delta": "new"
+        },
+        {
+          "name": "medium_alerts",
+          "value": "44",
+          "numeric": 44.0,
+          "threshold": "",
+          "threshold_status": "ok",
+          "delta": "new"
+        },
+        {
+          "name": "low_alerts",
+          "value": "11",
+          "numeric": 11.0,
+          "threshold": "",
+          "threshold_status": "ok",
+          "delta": "new"
+        }
+      ]
+    }
+  ]
+}
